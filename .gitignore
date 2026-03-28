@@ -1,0 +1,42 @@
+# Secrets and personal data — never commit these
+.env
+base_cv.md
+src/base_cv.md
+src/cv_template.docx
+src/cover_letter_template.docx
+
+# Database (contains application history)
+*.db
+applications.db
+
+# Output files (generated CVs and cover letters)
+output/
+logs/
+
+# Build artefacts
+dist/
+build/
+*.spec
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+.coveragerc
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# Claude Code local settings
+.claude/
+
+# Docs (may contain personal data)
+docs/

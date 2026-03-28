@@ -1,0 +1,25 @@
+{
+  "body_font": "Times New Roman",
+  "heading_font": "Times New Roman",
+  "body_size_pt": 10.5,
+  "heading1_size_pt": 11.0,
+  "heading2_size_pt": 13.0,
+  "heading_colour": null,
+  "accent_colour": null,
+  "paragraph_space_before_pt": 0.0,
+  "paragraph_space_after_pt": 13.3,
+  "line_spacing": null,
+  "margin_top_cm": 2.54,
+  "margin_bottom_cm": 3.26,
+  "margin_left_cm": 2.54,
+  "margin_right_cm": 2.53,
+  "has_header_block": true,
+  "has_horizontal_rule": false,
+  "section_headings": [
+    "EDUCATION",
+    "WORK EXPERIENCE & VOLUNTEERING"
+  ],
+  "uses_date_line": true,
+  "uses_salutation": true,
+  "sign_off": "Yours sincerely"
+}
