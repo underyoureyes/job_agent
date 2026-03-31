@@ -2,7 +2,6 @@
 review_queue.py - Interactive Application Review Queue
 =======================================================
 Presents each tailored application for human review before approval.
-Your son (or you) can approve, skip, or add notes to each one.
 
 Run: python main.py review
 """
@@ -18,6 +17,8 @@ from rich.prompt import Prompt, Confirm
 from rich import box
 from tracker import ApplicationTracker, STATUS_COLOURS
 from config import Config
+from reed_apply import ReedApplicant, ReedApplyError
+from linkedin_apply import LinkedInApplicant, LinkedInApplyError
 
 console = Console()
 
@@ -62,7 +63,6 @@ class ReviewQueue:
     def _review_one(self, job: Dict) -> str:
         """Display one job and prompt for action. Returns 'approved', 'skipped', or 'quit'."""
 
-        # Job summary panel
         score = job.get("match_score")
         score_str = f"{score}%" if score else "N/A"
         score_colour = "green" if score and score >= 70 else "yellow" if score and score >= 50 else "red"
@@ -85,7 +85,6 @@ class ReviewQueue:
 
         console.print(Panel(details, title=f"Job #{job['id']}", border_style="cyan"))
 
-        # Show file paths
         cv_path = job.get("tailored_cv_path")
         letter_path = job.get("cover_letter_path")
 
@@ -94,12 +93,25 @@ class ReviewQueue:
         if letter_path:
             console.print(f"  [cyan]Cover Letter:[/cyan] {letter_path}")
 
-        # Action menu
+        source = (job.get("source") or "").lower()
+        is_reed = source == "reed"
+        easy_apply = self.tracker.is_easy_apply(job)
+        is_linkedin = source in ("linkedin", "linkedin_rss", "linkedin_manual") and easy_apply is not False
+
         console.print("\n  [bold]Actions:[/bold]")
-        console.print("  [green]a[/green] Approve  [red]s[/red] Skip  [blue]o[/blue] Open files  [yellow]n[/yellow] Add note  [dim]q[/dim] Quit review")
+        choices = ["a", "s", "o", "n", "q"]
+        action_line = "  [green]a[/green] Approve  "
+        if is_reed:
+            action_line += "[magenta]r[/magenta] Approve & Apply on Reed  "
+            choices.insert(1, "r")
+        if is_linkedin:
+            action_line += "[blue]l[/blue] Approve & Easy Apply on LinkedIn  "
+            choices.insert(1, "l")
+        action_line += "[red]s[/red] Skip  [cyan]o[/cyan] Open files  [yellow]n[/yellow] Add note  [dim]q[/dim] Quit"
+        console.print(action_line)
 
         while True:
-            choice = Prompt.ask("  Choice", choices=["a", "s", "o", "n", "q"], default="o")
+            choice = Prompt.ask("  Choice", choices=choices, default="o")
 
             if choice == "o":
                 self._open_files(cv_path, letter_path)
@@ -115,6 +127,18 @@ class ReviewQueue:
                 console.print(f"  [green]✓ Approved! Application #{job['id']} is ready to submit.[/green]")
                 return "approved"
 
+            elif choice == "r":
+                self.tracker.update_status(job["id"], "approved", "Approved via review queue")
+                console.print(f"  [green]✓ Approved![/green] Launching Reed auto-apply...")
+                self._apply_on_reed(job)
+                return "approved"
+
+            elif choice == "l":
+                self.tracker.update_status(job["id"], "approved", "Approved via review queue")
+                console.print(f"  [green]✓ Approved![/green] Launching LinkedIn Easy Apply...")
+                self._apply_on_linkedin(job)
+                return "approved"
+
             elif choice == "s":
                 reason = Prompt.ask("  Reason for skipping (optional)", default="")
                 self.tracker.update_status(job["id"], "skipped", reason or "Skipped via review queue")
@@ -125,8 +149,37 @@ class ReviewQueue:
                 if Confirm.ask("  Quit review queue? (remaining jobs will stay pending)"):
                     return "quit"
 
+    def _apply_on_reed(self, job: Dict):
+        try:
+            applicant = ReedApplicant(self.config, headless=False)
+            submitted = applicant.apply(job)
+            if submitted:
+                self.tracker.update_status(job["id"], "submitted", "Auto-submitted via Reed apply")
+                console.print(f"  [bold green]✓ Application submitted and marked as submitted.[/bold green]")
+            else:
+                console.print(f"  [yellow]Application not submitted. Status remains 'approved'.[/yellow]")
+                console.print(f"  [dim]Submit manually and update via: python main.py status[/dim]")
+        except ReedApplyError as e:
+            console.print(f"  [red]Reed apply error: {e}[/red]")
+        except Exception as e:
+            console.print(f"  [red]Unexpected error during Reed auto-apply: {e}[/red]")
+
+    def _apply_on_linkedin(self, job: Dict):
+        try:
+            applicant = LinkedInApplicant(self.config, headless=False)
+            submitted = applicant.apply(job)
+            if submitted:
+                self.tracker.update_status(job["id"], "submitted", "Auto-submitted via LinkedIn Easy Apply")
+                console.print(f"  [bold green]✓ Application submitted and marked as submitted.[/bold green]")
+            else:
+                console.print(f"  [yellow]Application not submitted. Status remains 'approved'.[/yellow]")
+                console.print(f"  [dim]Submit manually and update via: python main.py status[/dim]")
+        except LinkedInApplyError as e:
+            console.print(f"  [red]LinkedIn apply error: {e}[/red]")
+        except Exception as e:
+            console.print(f"  [red]Unexpected error during LinkedIn auto-apply: {e}[/red]")
+
     def _open_files(self, cv_path: str, letter_path: str):
-        """Open files in the default system application."""
         system = platform.system()
         for path_str in [cv_path, letter_path]:
             if not path_str:

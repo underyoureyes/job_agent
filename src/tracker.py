@@ -193,6 +193,24 @@ class ApplicationTracker:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def is_easy_apply(self, job: Dict) -> Optional[bool]:
+        """
+        Return True if the job is known to support LinkedIn Easy Apply,
+        False if known not to, or None if unknown (scanner couldn't detect it).
+        Reads from the raw_data JSON stored at scan time.
+        """
+        raw = job.get("raw_data")
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            val = data.get("easy_apply")
+            if val is None:
+                return None
+            return bool(val)
+        except Exception:
+            return None
+
     def get_all_jobs(self) -> List[Dict]:
         with self._connect() as conn:
             rows = conn.execute(

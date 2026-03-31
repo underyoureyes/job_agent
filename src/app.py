@@ -138,6 +138,11 @@ class JobAgentApp(tk.Tk):
         self.tracker = None
         self._load_backend()
 
+        # Session activity log — records scoring/tailoring/apply events for email summary
+        from session_log import SessionLog
+        self._session = SessionLog()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # ── First-run: prompt for output folder if path doesn't exist ────────
         self._check_output_dir_on_startup()
 
@@ -159,6 +164,14 @@ class JobAgentApp(tk.Tk):
             self._show_screen("setup")
         else:
             self._show_screen("dashboard")
+
+    def _on_close(self):
+        """Send session summary email if there was any activity, then close."""
+        if self._session.has_activity() and self.config:
+            sent = self._session.send_summary(self.config)
+            if sent:
+                print("[Session Log] Summary email sent.")
+        self.destroy()
 
     # ── Backend loading ───────────────────────────────────────────────────────
 
@@ -288,6 +301,57 @@ class JobAgentApp(tk.Tk):
             text = text.rstrip("\n") + f"\nOUTPUT_DIR={output_dir}\n"
         prefs_path.write_text(text, encoding="utf-8")
 
+    def _save_linkedin_creds_to_prefs(self, email: str, password: str):
+        """Persist LinkedIn credentials to the user prefs file."""
+        import re
+        try:
+            from config import USER_PREFS_PATH
+            prefs_path = USER_PREFS_PATH
+        except Exception:
+            prefs_path = Path.home() / "Library" / "Application Support" / "JobAgent" / "user.env"
+
+        prefs_path.parent.mkdir(parents=True, exist_ok=True)
+        text = prefs_path.read_text(encoding="utf-8") if prefs_path.exists() else ""
+
+        if email:
+            if "LINKEDIN_APPLY_EMAIL=" in text:
+                text = re.sub(r"LINKEDIN_APPLY_EMAIL=.*", f"LINKEDIN_APPLY_EMAIL={email}", text)
+            else:
+                text = text.rstrip("\n") + f"\nLINKEDIN_APPLY_EMAIL={email}\n"
+
+        if password:
+            if "LINKEDIN_APPLY_PASSWORD=" in text:
+                text = re.sub(r"LINKEDIN_APPLY_PASSWORD=.*", f"LINKEDIN_APPLY_PASSWORD={password}", text)
+            else:
+                text = text.rstrip("\n") + f"\nLINKEDIN_APPLY_PASSWORD={password}\n"
+
+        prefs_path.write_text(text, encoding="utf-8")
+
+    def _save_email_prefs(self, notify_email: str, smtp_user: str, smtp_password: str):
+        """Persist email notification settings to the user prefs file."""
+        import re
+        try:
+            from config import USER_PREFS_PATH
+            prefs_path = USER_PREFS_PATH
+        except Exception:
+            prefs_path = Path.home() / "Library" / "Application Support" / "JobAgent" / "user.env"
+
+        prefs_path.parent.mkdir(parents=True, exist_ok=True)
+        text = prefs_path.read_text(encoding="utf-8") if prefs_path.exists() else ""
+
+        def set_pref(text, key, value):
+            if not value:
+                return text
+            if f"{key}=" in text:
+                return re.sub(rf"{key}=.*", f"{key}={value}", text)
+            return text.rstrip("\n") + f"\n{key}={value}\n"
+
+        text = set_pref(text, "NOTIFY_EMAIL",   notify_email)
+        text = set_pref(text, "SMTP_USER",      smtp_user)
+        text = set_pref(text, "SMTP_FROM",      smtp_user)
+        text = set_pref(text, "SMTP_PASSWORD",  smtp_password)
+        prefs_path.write_text(text, encoding="utf-8")
+
     # ── Sidebar ───────────────────────────────────────────────────────────────
 
     def _build_sidebar(self) -> tk.Frame:
@@ -308,6 +372,7 @@ class JobAgentApp(tk.Tk):
             ("settings",  "  Settings"),
             ("setup",     "  Setup"),
             ("log",       "  Scan log"),
+            ("database",  "  Database"),
             ("info",      "  Info"),
         ]
         for key, label in nav_items:
@@ -359,6 +424,8 @@ class JobAgentApp(tk.Tk):
             self._refresh_settings()
         elif name == "log":
             self._refresh_log_screen()
+        elif name == "database":
+            self._db_refresh_all()
         elif name == "info":
             pass  # static screen, no refresh needed
         elif name == "settings":
@@ -374,6 +441,7 @@ class JobAgentApp(tk.Tk):
             ("review",    self._build_review_screen),
             ("settings",  self._build_settings_screen),
             ("log",       self._build_log_screen),
+            ("database",  self._build_database_screen),
             ("info",      self._build_info_screen),
         ]:
             frame = tk.Frame(self._content, bg=BG)
@@ -430,6 +498,37 @@ class JobAgentApp(tk.Tk):
                 self._setup_anthropic_var.set(self.config.anthropic_api_key)
             if self.config.reed_api_key not in ("YOUR_REED_API_KEY", ""):
                 self._setup_reed_var.set(self.config.reed_api_key)
+
+        # ── Section: LinkedIn auto-apply ──────────────────────────────────────
+        self._section_label(inner, "LinkedIn Easy Apply")
+        tk.Label(inner, text="Used to log in when auto-applying to LinkedIn jobs.\nLeave blank if you don't want to use LinkedIn auto-apply.",
+                 font=FONT_SM, bg=BG, fg=TEXT2, justify="left").pack(anchor="w", padx=40, pady=(4, 0))
+
+        self._setup_li_email_var    = self._labeled_entry(inner, "LinkedIn email", "you@email.com")
+        self._setup_li_password_var = self._labeled_entry(inner, "LinkedIn password", "", show="*")
+
+        if self.config:
+            if getattr(self.config, "linkedin_apply_email", ""):
+                self._setup_li_email_var.set(self.config.linkedin_apply_email)
+            if getattr(self.config, "linkedin_apply_password", ""):
+                self._setup_li_password_var.set(self.config.linkedin_apply_password)
+
+        # ── Section: Session summary email ───────────────────────────────────
+        self._section_label(inner, "Session summary email (optional)")
+        tk.Label(inner, text="Sends a summary of activity (costs, scored jobs, tailored CVs, applications) when you close the app.\nUse a Gmail App Password — myaccount.google.com/apppasswords",
+                 font=FONT_SM, bg=BG, fg=TEXT2, justify="left").pack(anchor="w", padx=40, pady=(4, 0))
+
+        self._setup_notify_email_var = self._labeled_entry(inner, "Send summary to (email)", "you@email.com")
+        self._setup_smtp_user_var    = self._labeled_entry(inner, "Gmail address (sender)", "you@gmail.com")
+        self._setup_smtp_pass_var    = self._labeled_entry(inner, "Gmail App Password", "", show="*")
+
+        if self.config:
+            if getattr(self.config, "notify_email", ""):
+                self._setup_notify_email_var.set(self.config.notify_email)
+            if getattr(self.config, "smtp_user", ""):
+                self._setup_smtp_user_var.set(self.config.smtp_user)
+            if getattr(self.config, "smtp_password", ""):
+                self._setup_smtp_pass_var.set(self.config.smtp_password)
 
         # ── Section: Templates ────────────────────────────────────────────────
         self._section_label(inner, "Document templates (.docx)")
@@ -531,6 +630,11 @@ class JobAgentApp(tk.Tk):
         address2= self._setup_address2_var.get().strip()
         anth    = self._setup_anthropic_var.get().strip()
         reed    = self._setup_reed_var.get().strip()
+        li_email    = self._setup_li_email_var.get().strip()
+        li_password = self._setup_li_password_var.get().strip()
+        notify_email = self._setup_notify_email_var.get().strip()
+        smtp_user    = self._setup_smtp_user_var.get().strip()
+        smtp_pass    = self._setup_smtp_pass_var.get().strip()
         output_dir = self._output_dir_var.get().strip()
 
         if not name or name == "e.g. James Smith":
@@ -553,6 +657,10 @@ class JobAgentApp(tk.Tk):
         self._write_config(name=name, email=email, phone=phone,
                            linkedin=linkedin, address=address, address2=address2,
                            output_dir=output_dir, anthropic_key=anth, reed_key=reed)
+        if li_email or li_password:
+            self._save_linkedin_creds_to_prefs(li_email, li_password)
+        if notify_email or smtp_user or smtp_pass:
+            self._save_email_prefs(notify_email, smtp_user, smtp_pass)
 
         # Reload backend
         self._load_backend()
@@ -655,6 +763,9 @@ class JobAgentApp(tk.Tk):
         tk.Button(header, text="Refresh", font=FONT_SM, bg=BG2, fg=TEXT,
                   relief="flat", padx=10, pady=4,
                   command=self._refresh_dashboard).pack(side="right")
+        tk.Button(header, text="Export to Excel", font=FONT_SM, bg=GREEN_LT, fg=GREEN,
+                  relief="flat", padx=10, pady=4,
+                  command=self._export_dashboard).pack(side="right", padx=(0, 8))
 
         # Summary stat cards
         self._stat_frame = tk.Frame(parent, bg=BG)
@@ -810,6 +921,118 @@ class JobAgentApp(tk.Tk):
                                       status.replace("_", " ").title(),
                                       date))
 
+    def _export_dashboard(self):
+        """Export the current dashboard view (filtered + sorted) to Excel."""
+        if not hasattr(self, "_dash_all_jobs") or not self._dash_all_jobs:
+            messagebox.showinfo("Export", "No data to export.")
+            return
+
+        # Collect currently visible rows from the treeview (respects filter/sort)
+        rows = []
+        for iid in self._tree.get_children():
+            rows.append(self._tree.item(iid)["values"])
+
+        headers = ["ID", "Role", "Employer", "Match", "Status", "Found"]
+        self._export_to_excel(headers, rows, default_name="dashboard_export.xlsx")
+
+    def _export_screen(self):
+        """Export the current screen jobs view (filtered + sorted) to Excel."""
+        if not hasattr(self, "_screen_all_jobs") or not self._screen_all_jobs:
+            messagebox.showinfo("Export", "No data to export.")
+            return
+
+        # Apply same filters as the UI
+        query = self._screen_search_var.get().lower().strip()
+        high_only = getattr(self, "_screen_high_only", tk.BooleanVar()).get()
+        jobs = self._screen_all_jobs
+
+        if high_only:
+            jobs = [j for j in jobs if j.get("match_score") is not None and j["match_score"] >= 70]
+        if query:
+            jobs = [j for j in jobs if
+                    query in (j.get("title") or "").lower() or
+                    query in (j.get("employer") or "").lower() or
+                    query in (j.get("salary") or "").lower() or
+                    query in (j.get("source") or "").lower()]
+
+        headers = ["ID", "Role", "Employer", "Location", "Salary", "Match %", "Status", "Source", "Found", "URL"]
+        rows = []
+        for j in jobs:
+            rows.append([
+                j.get("id"),
+                j.get("title") or "",
+                j.get("employer") or "",
+                j.get("location") or "",
+                j.get("salary") or "",
+                j.get("match_score") or "",
+                (j.get("status") or "").replace("_", " ").title(),
+                j.get("source") or "",
+                (j.get("date_found") or "")[:10],
+                j.get("url") or "",
+            ])
+
+        self._export_to_excel(headers, rows, default_name="screen_jobs_export.xlsx")
+
+    def _export_to_excel(self, headers: list, rows: list, default_name: str):
+        """Write headers + rows to an Excel file chosen by the user."""
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+        except ImportError:
+            messagebox.showerror("Export", "openpyxl is not installed.\nRun: pip install openpyxl")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialfile=default_name,
+            title="Save Excel export",
+        )
+        if not path:
+            return
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+
+        # Header row styling
+        header_fill = PatternFill("solid", fgColor="185FA5")  # BLUE
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        for col_idx, heading in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=heading)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+
+        # Data rows — alternate shading
+        fill_alt = PatternFill("solid", fgColor="F0F0EE")
+        for row_idx, row in enumerate(rows, 2):
+            for col_idx, value in enumerate(row, 1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+                if row_idx % 2 == 0:
+                    cell.fill = fill_alt
+
+        # Auto-fit column widths
+        for col in ws.columns:
+            max_len = max((len(str(c.value)) if c.value else 0 for c in col), default=10)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
+
+        ws.row_dimensions[1].height = 20
+        ws.freeze_panes = "A2"  # Keep header visible when scrolling
+
+        wb.save(path)
+        messagebox.showinfo("Export", f"Exported {len(rows)} rows to:\n{path}")
+
+        # Open the file
+        try:
+            import subprocess, platform
+            if platform.system() == "Darwin":
+                subprocess.run(["open", path])
+            elif platform.system() == "Windows":
+                subprocess.run(["start", "", path], shell=True)
+        except Exception:
+            pass
+
     def _on_tree_select(self, event):
         pass  # Could show detail panel
 
@@ -891,6 +1114,9 @@ class JobAgentApp(tk.Tk):
         tk.Button(toolbar, text="Refresh", font=(FONT_FAMILY, 11, "bold"), bg=BG2, fg=TEXT,
                   relief="flat", padx=10, pady=4, activebackground=BORDER, activeforeground=TEXT,
                   command=self._refresh_screen).pack(side="left", padx=(0, 16))
+        tk.Button(toolbar, text="Export to Excel", font=(FONT_FAMILY, 11, "bold"), bg=GREEN_LT, fg=GREEN,
+                  relief="flat", padx=10, pady=4,
+                  command=self._export_screen).pack(side="left", padx=(0, 6))
 
         tk.Label(toolbar, text="Search:", font=FONT_SM, bg=BG, fg=TEXT2).pack(side="left")
         search_entry = tk.Entry(toolbar, textvariable=self._screen_search_var,
@@ -1339,6 +1565,7 @@ class JobAgentApp(tk.Tk):
         for job_id in to_score:
             self.tracker.update_status(job_id, "score_me", "Selected for scoring in UI")
 
+        self._last_scored_ids = to_score  # remember which jobs were in this batch
         self._score_btn.config(text="Scoring…", state="disabled", bg="#555")
         self.update_idletasks()
 
@@ -1370,9 +1597,11 @@ class JobAgentApp(tk.Tk):
         self._score_btn.config(text="📊  Score selected (~$0.01 each)",
                                state="normal", bg=BLUE)
         self._refresh_screen()
-        all_jobs = self.tracker.get_all_jobs() if self.tracker else []
-        scored   = [j for j in all_jobs if j["status"] == "scored"]
-        filtered = [j for j in all_jobs if j["status"] == "filtered"]
+        batch_ids = set(getattr(self, "_last_scored_ids", []))
+        batch_jobs = [self.tracker.get_job(jid) for jid in batch_ids if self.tracker.get_job(jid)]
+        self._session.record_scored(batch_jobs)
+        scored   = [j for j in batch_jobs if j["status"] == "scored"]
+        filtered = [j for j in batch_jobs if j["status"] == "filtered"]
         if scored or filtered:
             min_score = getattr(self.config, "min_match_score", 65) if self.config else 65
             high   = sum(1 for j in scored if j.get("match_score", 0) >= 70)
@@ -1419,6 +1648,7 @@ class JobAgentApp(tk.Tk):
         for job_id in to_tailor:
             self.tracker.update_status(job_id, "tailoring", "Selected in screening UI")
         selected_ids = to_tailor
+        self._last_tailored_ids = to_tailor
 
         self._tailor_btn.config(text="Tailoring…", state="disabled", bg="#555")
         self.update_idletasks()
@@ -1451,6 +1681,9 @@ class JobAgentApp(tk.Tk):
         self._tailor_btn.config(text="✍  Tailor selected jobs", state="normal", bg=BLUE)
         self._refresh_screen()
         self._refresh_review()
+        tailored_ids = set(getattr(self, "_last_tailored_ids", []))
+        tailored_jobs = [self.tracker.get_job(jid) for jid in tailored_ids if self.tracker.get_job(jid)]
+        self._session.record_tailored(tailored_jobs)
         n = len(self.tracker.get_pending_review()) if self.tracker else 0
         if n:
             messagebox.showinfo("Done", f"{n} application(s) tailored.\n\nGo to Review queue to check them.")
@@ -1526,6 +1759,23 @@ class JobAgentApp(tk.Tk):
                   bg=BG2, fg=TEXT, relief="flat", padx=14, pady=8,
                   command=self._review_next).pack(side="right")
 
+        # Auto-apply row — button shown/hidden based on job source
+        self._apply_row = tk.Frame(parent, bg=BG)
+        self._apply_row.pack(fill="x", padx=32, pady=(12, 0))
+        self._auto_apply_btn = tk.Button(
+            self._apply_row,
+            text="",
+            font=(FONT_FAMILY, 13, "bold"),
+            relief="flat", padx=20, pady=8,
+            command=self._review_auto_apply,
+        )
+        self._auto_apply_btn.pack(side="left")
+        self._auto_apply_status = tk.Label(
+            self._apply_row, text="", font=FONT_SM, bg=BG, fg=TEXT2
+        )
+        self._auto_apply_status.pack(side="left", padx=12)
+        self._apply_row.pack_forget()  # hidden until a supported job is shown
+
     def _refresh_review(self):
         if not self.tracker:
             return
@@ -1580,6 +1830,30 @@ class JobAgentApp(tk.Tk):
         if job.get("notes"):
             self._rv_notes.insert("1.0", job["notes"])
 
+        # Show auto-apply button for supported sources
+        src = (job.get("source") or "").lower()
+        apply_label = None
+        apply_colours = None
+        if src == "reed":
+            apply_label = "Approve & Apply on Reed"
+            apply_colours = ("#8B2FC9", "#F3E8FF")   # purple
+        elif src in ("linkedin", "linkedin_rss", "linkedin_manual"):
+            easy_apply = self.tracker.is_easy_apply(job) if self.tracker else None
+            if easy_apply is not False:  # True or None (unknown) — show button
+                apply_label = "Approve & Easy Apply on LinkedIn"
+                apply_colours = (BLUE, BLUE_LT)
+
+        if apply_label:
+            self._auto_apply_btn.config(
+                text=apply_label,
+                bg=apply_colours[0],
+                fg=TEXT,
+            )
+            self._auto_apply_status.config(text="")
+            self._apply_row.pack(fill="x", padx=32, pady=(12, 0))
+        else:
+            self._apply_row.pack_forget()
+
     def _open_review_url(self):
         url = getattr(self._rv_url, "_job_url", "")
         if url:
@@ -1625,6 +1899,73 @@ class JobAgentApp(tk.Tk):
         n = len(self._review_jobs)
         self._review_counter_label.config(text=f"{self._review_idx + 1 if n else 0} of {n}")
         self._show_review_job()
+
+    def _review_auto_apply(self):
+        """Approve the current job and launch the appropriate auto-apply module in a thread."""
+        if not self._review_jobs:
+            return
+        self._save_review_notes()
+        job = self._review_jobs[self._review_idx]
+        src = (job.get("source") or "").lower()
+
+        # Warn if Easy Apply status is unknown for LinkedIn jobs
+        if src in ("linkedin", "linkedin_rss", "linkedin_manual"):
+            easy_apply = self.tracker.is_easy_apply(job) if self.tracker else None
+            if easy_apply is None:
+                proceed = messagebox.askyesno(
+                    "Easy Apply not confirmed",
+                    "This job was scanned before Easy Apply detection was added, "
+                    "so it's not known whether it supports LinkedIn Easy Apply.\n\n"
+                    "If the job doesn't have Easy Apply, the browser will open "
+                    "but won't be able to submit automatically.\n\n"
+                    "Try anyway?",
+                )
+                if not proceed:
+                    return
+
+        self._auto_apply_btn.config(state="disabled")
+        self._auto_apply_status.config(text="Opening browser…", fg=TEXT2)
+
+        def run():
+            try:
+                if src == "reed":
+                    from reed_apply import ReedApplicant
+                    applicant = ReedApplicant(self.config, headless=False)
+                    submitted = applicant.apply(job)
+                elif src in ("linkedin", "linkedin_rss", "linkedin_manual"):
+                    from linkedin_apply import LinkedInApplicant
+                    applicant = LinkedInApplicant(self.config, headless=False)
+                    submitted = applicant.apply(job)
+                else:
+                    submitted = False
+
+                if submitted:
+                    self.tracker.update_status(job["id"], "approved", "Approved via UI review")
+                    self.tracker.update_status(job["id"], "submitted", f"Auto-submitted via {src} apply")
+                    self.after(0, lambda: self._auto_apply_done(job, platform=src, success=True))
+                else:
+                    self.after(0, lambda: self._auto_apply_done(job, platform=src, success=False))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: self._auto_apply_done(job, platform=src, success=False, error=err))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _auto_apply_done(self, job: dict, success: bool, platform: str = "", error: str = ""):
+        self._session.record_apply(job, platform or "unknown", success)
+        self._auto_apply_btn.config(state="normal")
+        if success:
+            self._auto_apply_status.config(text="✓ Submitted!", fg=GREEN)
+            self._review_jobs.pop(self._review_idx)
+            if self._review_idx >= len(self._review_jobs):
+                self._review_idx = max(0, len(self._review_jobs) - 1)
+            self._show_review_job()
+        elif error:
+            self._auto_apply_status.config(text=f"Error: {error}", fg=RED)
+        else:
+            self._auto_apply_status.config(
+                text="No Easy Apply found — apply manually on LinkedIn.", fg=AMBER
+            )
 
     def _review_skip(self):
         if not self._review_jobs:
@@ -2125,6 +2466,166 @@ class JobAgentApp(tk.Tk):
                                 f"Scan finished.\n\n{discovered} job(s) found and ready to review.\n\n"
                                 f"No credits spent yet — review titles in Screen jobs first.")
             self._show_screen("screen")
+
+
+    # ── DATABASE SCREEN ───────────────────────────────────────────────────────
+
+    def _build_database_screen(self, parent: tk.Frame):
+        tk.Label(parent, text="Database", font=FONT_HEAD, bg=BG, fg=TEXT).pack(
+            anchor="w", padx=32, pady=(28, 2))
+        tk.Label(parent, text="Browse all records, or write SQL to query the database.",
+                 font=FONT_SM, bg=BG, fg=TEXT2).pack(anchor="w", padx=32, pady=(0, 16))
+
+        # ── Top pane: all records ─────────────────────────────────────────────
+        top_frame = tk.Frame(parent, bg=BG)
+        top_frame.pack(fill="both", expand=True, padx=32, pady=(0, 8))
+
+        top_bar = tk.Frame(top_frame, bg=BG)
+        top_bar.pack(fill="x", pady=(0, 6))
+        tk.Label(top_bar, text="All records", font=(FONT_FAMILY, 12, "bold"),
+                 bg=BG, fg=TEXT).pack(side="left")
+        tk.Button(top_bar, text="Refresh", font=FONT_SM, bg=BG2, fg=TEXT,
+                  relief="flat", padx=10, pady=4,
+                  command=self._db_refresh_all).pack(side="right")
+
+        all_cols = ("id", "title", "employer", "location", "salary",
+                    "status", "match_score", "date_found", "date_updated", "url")
+        tree_frame = tk.Frame(top_frame, bg=BG)
+        tree_frame.pack(fill="both", expand=True)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
+        self._db_all_tree = ttk.Treeview(
+            tree_frame, columns=all_cols, show="headings",
+            yscrollcommand=vsb.set, xscrollcommand=hsb.set, height=8)
+        vsb.config(command=self._db_all_tree.yview)
+        hsb.config(command=self._db_all_tree.xview)
+
+        col_widths = {"id": 40, "title": 220, "employer": 150, "location": 100,
+                      "salary": 90, "status": 90, "match_score": 70,
+                      "date_found": 120, "date_updated": 120, "url": 180}
+        for c in all_cols:
+            self._db_all_tree.heading(c, text=c.replace("_", " ").title())
+            self._db_all_tree.column(c, width=col_widths.get(c, 100), anchor="w")
+
+        self._db_all_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+
+        # ── Middle pane: SQL editor ───────────────────────────────────────────
+        mid_frame = tk.Frame(parent, bg=BG)
+        mid_frame.pack(fill="x", padx=32, pady=(0, 8))
+
+        mid_bar = tk.Frame(mid_frame, bg=BG)
+        mid_bar.pack(fill="x", pady=(0, 4))
+        tk.Label(mid_bar, text="SQL query", font=(FONT_FAMILY, 12, "bold"),
+                 bg=BG, fg=TEXT).pack(side="left")
+        tk.Button(mid_bar, text="Run  ▶", font=FONT_SM, bg=BLUE, fg="white",
+                  relief="flat", padx=14, pady=4,
+                  command=self._db_run_query).pack(side="right")
+
+        self._db_sql_editor = scrolledtext.ScrolledText(
+            mid_frame, height=5, font=("Courier New", 12),
+            bg=CARD, fg=TEXT, insertbackground=TEXT,
+            relief="flat", bd=1, wrap="none")
+        self._db_sql_editor.pack(fill="x")
+        self._db_sql_editor.insert("1.0", "SELECT * FROM jobs ORDER BY date_found DESC LIMIT 100;")
+
+        # ── Bottom pane: query results ────────────────────────────────────────
+        bot_frame = tk.Frame(parent, bg=BG)
+        bot_frame.pack(fill="both", expand=True, padx=32, pady=(0, 24))
+
+        bot_bar = tk.Frame(bot_frame, bg=BG)
+        bot_bar.pack(fill="x", pady=(0, 6))
+        self._db_result_label = tk.Label(bot_bar, text="Results", font=(FONT_FAMILY, 12, "bold"),
+                                         bg=BG, fg=TEXT)
+        self._db_result_label.pack(side="left")
+        tk.Button(bot_bar, text="Export to Excel", font=FONT_SM, bg=GREEN_LT, fg=GREEN,
+                  relief="flat", padx=12, pady=4,
+                  command=self._db_export_results).pack(side="right")
+
+        res_frame = tk.Frame(bot_frame, bg=BG)
+        res_frame.pack(fill="both", expand=True)
+
+        vsb2 = ttk.Scrollbar(res_frame, orient="vertical")
+        hsb2 = ttk.Scrollbar(res_frame, orient="horizontal")
+        self._db_result_tree = ttk.Treeview(
+            res_frame, show="headings",
+            yscrollcommand=vsb2.set, xscrollcommand=hsb2.set, height=8)
+        vsb2.config(command=self._db_result_tree.yview)
+        hsb2.config(command=self._db_result_tree.xview)
+
+        self._db_result_tree.grid(row=0, column=0, sticky="nsew")
+        vsb2.grid(row=0, column=1, sticky="ns")
+        hsb2.grid(row=1, column=0, sticky="ew")
+        res_frame.rowconfigure(0, weight=1)
+        res_frame.columnconfigure(0, weight=1)
+
+        self._db_result_cols: list = []  # current result column names
+        self._db_result_rows: list = []  # current result data rows
+
+        # populate all-records table immediately
+        self._db_refresh_all()
+
+    def _db_refresh_all(self):
+        """Reload the top all-records Treeview from the database."""
+        if not self.tracker:
+            return
+        jobs = self.tracker.get_all_jobs()
+        self._db_all_tree.delete(*self._db_all_tree.get_children())
+        cols = ("id", "title", "employer", "location", "salary",
+                "status", "match_score", "date_found", "date_updated", "url")
+        for job in jobs:
+            self._db_all_tree.insert("", "end", values=[job.get(c, "") for c in cols])
+
+    def _db_run_query(self):
+        """Execute the SQL in the editor and display results in the bottom pane."""
+        if not self.tracker:
+            messagebox.showerror("Database", "No database connected.")
+            return
+        sql = self._db_sql_editor.get("1.0", "end").strip()
+        if not sql:
+            return
+        import sqlite3
+        try:
+            conn = sqlite3.connect(self.tracker.db_path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(sql)
+            rows = cur.fetchall()
+            col_names = [d[0] for d in cur.description] if cur.description else []
+            conn.close()
+        except Exception as e:
+            messagebox.showerror("SQL error", str(e))
+            return
+
+        # Update result Treeview
+        self._db_result_cols = col_names
+        self._db_result_rows = [list(r) for r in rows]
+
+        self._db_result_tree["columns"] = col_names
+        self._db_result_tree.delete(*self._db_result_tree.get_children())
+        for c in col_names:
+            self._db_result_tree.heading(c, text=c.replace("_", " ").title())
+            self._db_result_tree.column(c, width=120, anchor="w")
+        for row in self._db_result_rows:
+            self._db_result_tree.insert("", "end", values=row)
+
+        n = len(rows)
+        self._db_result_label.config(
+            text=f"Results — {n} row{'s' if n != 1 else ''}")
+
+    def _db_export_results(self):
+        """Export the current query results to Excel."""
+        if not self._db_result_cols:
+            messagebox.showinfo("Export", "Run a query first to get results.")
+            return
+        self._export_to_excel(
+            self._db_result_cols,
+            self._db_result_rows,
+            default_name="db_query_export.xlsx",
+        )
 
 
 def main():

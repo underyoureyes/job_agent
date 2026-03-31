@@ -516,6 +516,13 @@ class JobScanner:
                             except ValueError:
                                 pass
 
+                        # Detect Easy Apply badge — present on cards for EA-enabled jobs
+                        easy_apply = bool(
+                            card.select_one(".job-search-card__easy-apply-label") or
+                            card.select_one("[class*='easy-apply']") or
+                            card.find(string=lambda t: t and "easy apply" in t.lower())
+                        )
+
                         jobs.append({
                             "title": title,
                             "employer": employer,
@@ -525,6 +532,7 @@ class JobScanner:
                             "description": "",  # fetched on demand by cv_tailor
                             "source": "linkedin",
                             "date_closes": "",
+                            "easy_apply": easy_apply,
                         })
                     except Exception:
                         continue

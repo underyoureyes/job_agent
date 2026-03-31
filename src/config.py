@@ -69,6 +69,22 @@ class Config:
     candidate_address:  str = field(default_factory=lambda: os.getenv("CANDIDATE_ADDRESS",  ""))
     candidate_address2: str = field(default_factory=lambda: os.getenv("CANDIDATE_ADDRESS2", ""))
 
+    # ── Reed auto-apply credentials (optional) ───────────────────────────────
+    reed_email:    str = field(default_factory=lambda: os.getenv("REED_LOGIN_EMAIL",    ""))
+    reed_password: str = field(default_factory=lambda: os.getenv("REED_LOGIN_PASSWORD", ""))
+
+    # ── LinkedIn auto-apply credentials (required for Easy Apply) ────────────
+    linkedin_apply_email:    str = field(default_factory=lambda: os.getenv("LINKEDIN_APPLY_EMAIL",    ""))
+    linkedin_apply_password: str = field(default_factory=lambda: os.getenv("LINKEDIN_APPLY_PASSWORD", ""))
+
+    # ── Session summary email ─────────────────────────────────────────────────
+    notify_email:   str = field(default_factory=lambda: os.getenv("NOTIFY_EMAIL",   ""))
+    smtp_from:      str = field(default_factory=lambda: os.getenv("SMTP_FROM",      ""))
+    smtp_host:      str = field(default_factory=lambda: os.getenv("SMTP_HOST",      "smtp.gmail.com"))
+    smtp_port:      str = field(default_factory=lambda: os.getenv("SMTP_PORT",      "587"))
+    smtp_user:      str = field(default_factory=lambda: os.getenv("SMTP_USER",      ""))
+    smtp_password:  str = field(default_factory=lambda: os.getenv("SMTP_PASSWORD",  ""))
+
     # ── Education ─────────────────────────────────────────────────────────────
     current_degree: str = "MSc Public Policy, King's College London (2024-2025)"
 

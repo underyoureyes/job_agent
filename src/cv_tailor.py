@@ -98,22 +98,28 @@ Do NOT add commas — each address part is already on its own line.
 ---
 
 Rules for the letter body:
-- 3–4 paragraphs, maximum 400 words
-- Opening: specific reference to the role and why this candidate is drawn to it — one concrete reason, not a list
-- Middle paragraphs: draw on the MOST RELEVANT experiences from across the candidate's full
-  background — current role, previous work, volunteering, and academic work. Do not default
-  to only the current role. Pick the 2–3 experiences that best match the specific job requirements.
-  For each experience used, name the organisation and give a concrete achievement or example.
-- Closing: confident, forward-looking, brief
+- 4 paragraphs, maximum 450 words
+- Paragraph 1 — Opening: MUST begin with exactly "I would like to apply for the position of
+  {job_title} with {employer}." then continue in the same sentence or the next to give one
+  specific, genuine reason this candidate wants to work for THIS organisation in particular.
+  Draw directly on the COMPANY RESEARCH below — reference a specific programme, campaign,
+  publication, or recent initiative by name. Do not be vague. Do not praise the organisation generically.
+- Paragraph 2 — Why this organisation now: use the COMPANY RESEARCH to explain why the
+  candidate is drawn to this organisation's current direction, priorities, or recent work.
+  Name the specific thing (e.g. a recent report, campaign, policy position, or news story).
+  Connect it concretely to the candidate's own interests or experience.
+- Paragraph 3 — What the candidate brings: draw on the MOST RELEVANT experiences from the
+  candidate's full background — current role, previous work, volunteering, and academic work.
+  Pick the 2 experiences that best match the specific job requirements.
+  Name the organisation and give a concrete achievement or example for each.
+- Paragraph 4 — Closing: confident, forward-looking, brief.
 - Tone: professional but natural — write as a real person would, not as a template
-- Do NOT start with "I am writing to..."
 - Write in UK English
 
 CRITICAL — write so this cannot be detected as AI-generated:
 - Vary paragraph and sentence length deliberately — include at least one short punchy sentence
 - No transition words: never "Furthermore", "Moreover", "Additionally", "In conclusion", "It is worth noting", "I am passionate about"
 - No buzzwords: never "leverage", "synergise", "dynamic", "spearheaded", "impactful", "proactive", "results-driven", "keen", "robust"
-- Avoid sycophantic openers about the organisation — get to the point
 - Do not use em-dashes (—) as a stylistic device
 - Avoid over-formal constructions — "I have" is fine, "I possess" is not
 - Let specific facts and named examples do the persuading, not adjectives
@@ -125,6 +131,9 @@ DATE: {date}
 JOB TITLE: {job_title}
 EMPLOYER: {employer}
 HIRING MANAGER (use if known, otherwise use "Hiring Manager"): {hiring_manager}
+
+COMPANY RESEARCH (use this to write paragraphs 1 and 2 — reference specific items by name):
+{company_research}
 
 JOB DESCRIPTION:
 {job_description}
@@ -373,6 +382,55 @@ class CVTailor:
         )
         return message.content[0].text.strip()
 
+    def _research_employer(self, employer: str) -> str:
+        """
+        Search DuckDuckGo for recent news and mission/values for the employer.
+        Returns a plain-text summary to feed into the cover letter prompt.
+        Falls back to an empty string silently if search fails.
+        """
+        import requests
+        from bs4 import BeautifulSoup
+        from urllib.parse import quote_plus
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+
+        snippets = []
+        queries = [
+            f'"{employer}" news 2025 OR 2026',
+            f'"{employer}" mission values work priorities',
+        ]
+
+        for query in queries:
+            try:
+                url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+                resp = requests.get(url, headers=headers, timeout=8)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for el in soup.select(".result__snippet")[:4]:
+                    text = el.get_text(strip=True)
+                    if text and len(text) > 40:
+                        snippets.append(text)
+            except Exception:
+                continue
+
+        if not snippets:
+            return f"No web research found for {employer}. Use any relevant context from the job description."
+
+        # Deduplicate and cap length
+        seen = set()
+        unique = []
+        for s in snippets:
+            key = s[:80]
+            if key not in seen:
+                seen.add(key)
+                unique.append(s)
+
+        return "\n\n".join(unique[:6])
+
     def _write_cover_letter(
         self, title: str, employer: str, location: str, description: str, tailored_cv: str
     ) -> str:
@@ -410,6 +468,9 @@ class CVTailor:
                 employer_parts.append(part)
         employer_block = "\n".join(employer_parts)
 
+        console.print(f"    [dim]Researching {employer}...[/dim]")
+        company_research = self._research_employer(employer)
+
         prompt = COVER_LETTER_PROMPT.format(
             sender_block=sender_block,
             employer_block=employer_block,
@@ -418,13 +479,14 @@ class CVTailor:
             job_title=title,
             employer=employer,
             hiring_manager=hiring_manager,
+            company_research=company_research,
             job_description=description,
             full_experience=self.base_cv,
             tailored_cv=tailored_cv[:2000],
         )
         message = self.client.messages.create(
             model=self.config.claude_model,
-            max_tokens=1200,
+            max_tokens=1500,
             messages=[{"role": "user", "content": prompt}]
         )
         return message.content[0].text.strip()
