@@ -100,13 +100,25 @@ class ScanScreen(BaseScreen):
         self._screen_summary_bar = tk.Frame(parent, bg=BG2)
         self._screen_summary_bar.pack(fill="x", padx=32, pady=(0, 4))
 
-        # Treeview
+        # Treeview — custom style so the checkbox column uses a larger font
+        style = ttk.Style()
+        style.configure("Scan.Treeview",
+                         font=(FONT_FAMILY, 13), rowheight=36,
+                         background=CARD, fieldbackground=CARD,
+                         foreground=TEXT, borderwidth=0)
+        style.configure("Scan.Treeview.Heading",
+                         font=(FONT_FAMILY, 11, "bold"),
+                         background=BG2, foreground=TEXT2, relief="flat")
+        style.map("Scan.Treeview",
+                  background=[("selected", BLUE_LT)],
+                  foreground=[("selected", BLUE)])
+
         list_frame = tk.Frame(parent, bg=BG)
         list_frame.pack(fill="both", expand=True, padx=32)
 
         cols = ("sel", "title", "employer", "match", "salary", "source")
         self._tree = ttk.Treeview(list_frame, columns=cols, show="headings",
-                                   selectmode="none")
+                                   selectmode="none", style="Scan.Treeview")
 
         self._tree.heading("sel",      text="",         anchor="center")
         self._tree.heading("title",    text="Role",     anchor="w",
@@ -120,7 +132,7 @@ class ScanScreen(BaseScreen):
         self._tree.heading("source",   text="Source",   anchor="w",
                            command=lambda: self._sort_col("source"))
 
-        self._tree.column("sel",      width=36,  minwidth=36,  stretch=False, anchor="center")
+        self._tree.column("sel",      width=46,  minwidth=46,  stretch=False, anchor="center")
         self._tree.column("title",    width=320, minwidth=180, stretch=True,  anchor="w")
         self._tree.column("employer", width=180, minwidth=100, stretch=False, anchor="w")
         self._tree.column("match",    width=72,  minwidth=60,  stretch=False, anchor="center")
