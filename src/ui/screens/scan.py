@@ -2,6 +2,8 @@
 ui/screens/scan.py
 ==================
 ScanScreen — browse scored jobs, select for tailoring, score/tailor actions.
+Uses ttk.Treeview for fast rendering; filtering is delete+reinsert, not
+widget-destroy/recreate, so it stays responsive with hundreds of rows.
 """
 
 import sys
@@ -25,13 +27,18 @@ from ui.screens.base import BaseScreen
 class ScanScreen(BaseScreen):
     def __init__(self, parent: tk.Frame, ctx: AppContext):
         super().__init__(parent, ctx)
-        self._screen_all_jobs = []
-        self._screen_sort_col = None
-        self._screen_sort_asc = True
+        self._screen_all_jobs  = []
+        self._screen_job_map   = {}          # job_id -> job dict
+        self._selected_ids     = set()       # currently checked job IDs
+        self._screen_sort_col  = None
+        self._screen_sort_asc  = True
         self._screen_search_var = tk.StringVar()
-        self._screen_high_only = tk.BooleanVar(value=False)
-        self._screen_vars = {}
+        self._screen_high_only  = tk.BooleanVar(value=False)
+        self._show_filtered_var = tk.BooleanVar(value=False)
+        self._tooltip_win       = None
         self._build(self.frame)
+
+    # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build(self, parent: tk.Frame):
         # Header
@@ -42,37 +49,37 @@ class ScanScreen(BaseScreen):
         self._screen_counter.pack(side="left", padx=14)
 
         tk.Label(parent,
-                 text="Tick the jobs you want to apply for, then click Score selected (~$0.01 each). No money spent until you click Score.",
+                 text="Tick the jobs you want to apply for, then click Score selected (~$0.01 each). "
+                      "No money spent until you click Score.",
                  font=FONT_SM, bg=BG, fg=TEXT2, justify="left").pack(anchor="w", padx=32, pady=(0, 8))
 
-        # Toolbar row 1
+        # Toolbar
         toolbar = tk.Frame(parent, bg=BG)
         toolbar.pack(fill="x", padx=32, pady=(0, 4))
-        tk.Button(toolbar, text="Select all", font=(FONT_FAMILY, 11, "bold"), bg=BG2, fg=TEXT,
-                  relief="flat", padx=10, pady=4, activebackground=BORDER, activeforeground=TEXT,
-                  command=self._screen_select_all).pack(side="left", padx=(0, 6))
-        tk.Button(toolbar, text="Deselect all", font=(FONT_FAMILY, 11, "bold"), bg=BG2, fg=TEXT,
-                  relief="flat", padx=10, pady=4, activebackground=BORDER, activeforeground=TEXT,
-                  command=self._screen_deselect_all).pack(side="left", padx=(0, 6))
-        tk.Button(toolbar, text="Refresh", font=(FONT_FAMILY, 11, "bold"), bg=BG2, fg=TEXT,
-                  relief="flat", padx=10, pady=4, activebackground=BORDER, activeforeground=TEXT,
-                  command=self._refresh_screen).pack(side="left", padx=(0, 16))
-        tk.Button(toolbar, text="Export to Excel", font=(FONT_FAMILY, 11, "bold"), bg=GREEN_LT, fg=GREEN,
-                  relief="flat", padx=10, pady=4,
-                  command=self._export_screen).pack(side="left", padx=(0, 6))
 
-        tk.Label(toolbar, text="Search:", font=FONT_SM, bg=BG, fg=TEXT2).pack(side="left")
-        search_entry = tk.Entry(toolbar, textvariable=self._screen_search_var,
-                                font=FONT_SM, width=20, relief="solid", bd=1, bg=CARD)
-        search_entry.pack(side="left", padx=(4, 4), ipady=3)
+        for label, cmd, bg_col, fg_col in [
+            ("Select all",    self._screen_select_all,   BG2,      TEXT),
+            ("Deselect all",  self._screen_deselect_all, BG2,      TEXT),
+            ("Refresh",       self._refresh_screen,      BG2,      TEXT),
+            ("Hide selected", self._hide_selected,       RED_LT,   RED),
+            ("Export to Excel", self._export_screen,     GREEN_LT, GREEN),
+        ]:
+            tk.Button(toolbar, text=label, font=(FONT_FAMILY, 11, "bold"),
+                      bg=bg_col, fg=fg_col, relief="flat", padx=10, pady=4,
+                      activebackground=BORDER, activeforeground=fg_col,
+                      command=cmd).pack(side="left", padx=(0, 6))
+
+        tk.Label(toolbar, text="Search:", font=FONT_SM, bg=BG, fg=TEXT2).pack(side="left", padx=(8, 0))
+        tk.Entry(toolbar, textvariable=self._screen_search_var,
+                 font=FONT_SM, width=20, relief="solid", bd=1, bg=CARD
+                 ).pack(side="left", padx=(4, 2), ipady=3)
         self._screen_search_var.trace_add("write", lambda *_: self._apply_screen_filter())
         tk.Button(toolbar, text="✕", font=FONT_SM, bg=BG2, fg=TEXT2, relief="flat",
                   padx=4, command=lambda: self._screen_search_var.set("")).pack(side="left")
 
-        # Toolbar row 2: filter chips
+        # Filter chips
         filter_bar = tk.Frame(parent, bg=BG)
         filter_bar.pack(fill="x", padx=32, pady=(0, 6))
-
         tk.Label(filter_bar, text="Filter:", font=FONT_SM, bg=BG, fg=TEXT2).pack(side="left", padx=(0, 6))
 
         self._high_only_btn = tk.Button(
@@ -80,11 +87,10 @@ class ScanScreen(BaseScreen):
             font=(FONT_FAMILY, 11, "bold"), bg=BG2, fg=TEXT,
             relief="flat", padx=10, pady=3,
             activebackground=GREEN_LT, activeforeground=GREEN,
-            command=self._toggle_high_only
+            command=self._toggle_high_only,
         )
         self._high_only_btn.pack(side="left", padx=(0, 6))
 
-        self._show_filtered_var = tk.BooleanVar(value=False)
         tk.Checkbutton(filter_bar, text="Show filtered & hidden jobs",
                        variable=self._show_filtered_var,
                        font=FONT_SM, bg=BG, fg=TEXT2, activebackground=BG,
@@ -94,78 +100,315 @@ class ScanScreen(BaseScreen):
         self._screen_summary_bar = tk.Frame(parent, bg=BG2)
         self._screen_summary_bar.pack(fill="x", padx=32, pady=(0, 4))
 
-        # Scrollable job list
+        # Treeview
         list_frame = tk.Frame(parent, bg=BG)
         list_frame.pack(fill="both", expand=True, padx=32)
 
-        self._screen_canvas = tk.Canvas(list_frame, bg=BG, highlightthickness=0)
-        vsb = ttk.Scrollbar(list_frame, orient="vertical", command=self._screen_canvas.yview)
-        self._screen_inner = tk.Frame(self._screen_canvas, bg=BG)
-        self._screen_inner.bind(
-            "<Configure>",
-            lambda e: self._screen_canvas.configure(scrollregion=self._screen_canvas.bbox("all"))
-        )
-        self._screen_canvas.create_window((0, 0), window=self._screen_inner, anchor="nw")
-        self._screen_canvas.configure(yscrollcommand=vsb.set)
-        self._screen_canvas.pack(side="left", fill="both", expand=True)
+        cols = ("sel", "title", "employer", "match", "salary", "source")
+        self._tree = ttk.Treeview(list_frame, columns=cols, show="headings",
+                                   selectmode="none")
+
+        self._tree.heading("sel",      text="",         anchor="center")
+        self._tree.heading("title",    text="Role",     anchor="w",
+                           command=lambda: self._sort_col("title"))
+        self._tree.heading("employer", text="Employer", anchor="w",
+                           command=lambda: self._sort_col("employer"))
+        self._tree.heading("match",    text="Match",    anchor="center",
+                           command=lambda: self._sort_col("match_score"))
+        self._tree.heading("salary",   text="Salary",   anchor="w",
+                           command=lambda: self._sort_col("salary"))
+        self._tree.heading("source",   text="Source",   anchor="w",
+                           command=lambda: self._sort_col("source"))
+
+        self._tree.column("sel",      width=36,  minwidth=36,  stretch=False, anchor="center")
+        self._tree.column("title",    width=320, minwidth=180, stretch=True,  anchor="w")
+        self._tree.column("employer", width=180, minwidth=100, stretch=False, anchor="w")
+        self._tree.column("match",    width=72,  minwidth=60,  stretch=False, anchor="center")
+        self._tree.column("salary",   width=145, minwidth=80,  stretch=False, anchor="w")
+        self._tree.column("source",   width=115, minwidth=60,  stretch=False, anchor="w")
+
+        self._tree.tag_configure("high",      foreground=GREEN)
+        self._tree.tag_configure("medium",    foreground=AMBER)
+        self._tree.tag_configure("low_score", foreground=RED)
+        self._tree.tag_configure("grayed",    foreground=TEXT2)
+        self._tree.tag_configure("checked",   background=BLUE_LT)
+        self._tree.tag_configure("odd",       background=CARD)
+        self._tree.tag_configure("even",      background=BG)
+
+        vsb = ttk.Scrollbar(list_frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        self._tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        self._screen_canvas.bind_all("<MouseWheel>",
-            lambda e: self._screen_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        self._tree.bind("<Button-1>",        self._on_tree_click)
+        self._tree.bind("<Double-Button-1>", self._on_tree_double_click)
+        self._tree.bind("<Motion>",          self._on_tree_motion)
+        self._tree.bind("<Leave>",           self._hide_tooltip)
+        self._tree.bind("<MouseWheel>",
+            lambda e: self._tree.yview_scroll(int(-1 * (e.delta / 120)), "units"))
 
         # Bottom action bar
         action_bar = tk.Frame(parent, bg=BG2)
         action_bar.pack(fill="x", side="bottom")
+
         self._score_btn = tk.Button(
-            action_bar,
-            text="📊  Score selected (~$0.01 each)",
-            font=(FONT_FAMILY, 13, "bold"),
-            bg=BLUE, fg=TEXT,
-            padx=20, pady=10,
-            command=self._score_selected
+            action_bar, text="📊  Score selected (~$0.01 each)",
+            font=(FONT_FAMILY, 13, "bold"), bg=BLUE, fg=TEXT,
+            padx=20, pady=10, command=self._score_selected,
         )
         self._score_btn.pack(side="right", padx=(8, 16), pady=8)
 
         self._tailor_btn = tk.Button(
-            action_bar,
-            text="✍  Tailor scored jobs (~$0.05 each)",
-            font=(FONT_FAMILY, 13, "bold"),
-            bg=GREEN, fg="black", relief="flat",
-            padx=20, pady=10,
-            command=self._tailor_selected
+            action_bar, text="✍  Tailor scored jobs (~$0.05 each)",
+            font=(FONT_FAMILY, 13, "bold"), bg=GREEN, fg="black",
+            relief="flat", padx=20, pady=10, command=self._tailor_selected,
         )
         self._tailor_btn.pack(side="right", padx=16, pady=8)
+
         self._screen_status_label = tk.Label(
-            action_bar, text="", font=FONT_SM, bg=BG2, fg=TEXT2
+            action_bar, text="", font=FONT_SM, bg=BG2, fg=TEXT2,
         )
         self._screen_status_label.pack(side="left", padx=16, pady=8)
+
+    # ── Tree interaction ──────────────────────────────────────────────────────
+
+    def _on_tree_click(self, event):
+        region = self._tree.identify_region(event.x, event.y)
+        col    = self._tree.identify_column(event.x)
+        iid    = self._tree.identify_row(event.y)
+        if not iid or region != "cell" or col != "#1":
+            return
+        job_id = int(iid)
+        job    = self._screen_job_map.get(job_id)
+        if not job or job.get("status") in ("filtered", "dismissed"):
+            return
+        if job_id in self._selected_ids:
+            self._selected_ids.discard(job_id)
+        else:
+            self._selected_ids.add(job_id)
+        self._refresh_row(job_id)
+        self._update_screen_count()
+
+    def _on_tree_double_click(self, event):
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            return
+        job = self._screen_job_map.get(int(iid))
+        if job and job.get("url"):
+            webbrowser.open(job["url"])
+
+    def _on_tree_motion(self, event):
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            self._hide_tooltip()
+            return
+        job      = self._screen_job_map.get(int(iid))
+        tip_text = (job.get("match_reason") or "").strip() if job else ""
+        if tip_text:
+            self._show_tooltip(event, tip_text)
+        else:
+            self._hide_tooltip()
+
+    def _show_tooltip(self, event, text: str):
+        if self._tooltip_win:
+            self._tooltip_win.destroy()
+        x = self._tree.winfo_rootx() + event.x + 16
+        y = self._tree.winfo_rooty() + event.y + 16
+        self._tooltip_win = tk.Toplevel(self._tree)
+        self._tooltip_win.wm_overrideredirect(True)
+        self._tooltip_win.wm_geometry(f"+{x}+{y}")
+        tk.Label(self._tooltip_win, text=text, font=FONT_SM, bg="#FFFBE6",
+                 fg=TEXT, relief="solid", bd=1,
+                 wraplength=420, justify="left", padx=8, pady=6).pack()
+
+    def _hide_tooltip(self, event=None):
+        if self._tooltip_win:
+            self._tooltip_win.destroy()
+            self._tooltip_win = None
+
+    # ── Row tag helpers ───────────────────────────────────────────────────────
+
+    def _row_tags(self, job: dict, row_index: int) -> tuple:
+        score  = job.get("match_score")
+        status = job.get("status", "")
+        job_id = job["id"]
+
+        parity = "odd" if row_index % 2 else "even"
+
+        if status in ("filtered", "dismissed"):
+            score_tag = "grayed"
+        elif score is None:
+            score_tag = ""
+        elif score >= 70:
+            score_tag = "high"
+        elif score >= 55:
+            score_tag = "medium"
+        else:
+            score_tag = "low_score"
+
+        tags = tuple(t for t in (parity, score_tag) if t)
+        if job_id in self._selected_ids:
+            tags += ("checked",)
+        return tags
+
+    def _refresh_row(self, job_id: int):
+        """Update a single row's checkbox symbol and tags after toggle."""
+        job = self._screen_job_map.get(job_id)
+        if not job:
+            return
+        try:
+            children = self._tree.get_children()
+            idx  = list(children).index(str(job_id))
+            checked = job_id in self._selected_ids
+            self._tree.set(str(job_id), "sel", "☑" if checked else "☐")
+            self._tree.item(str(job_id), tags=self._row_tags(job, idx))
+        except (ValueError, tk.TclError):
+            pass
+
+    # ── Data loading ──────────────────────────────────────────────────────────
 
     def refresh(self):
         self._refresh_screen()
 
-    def _bind_tooltip(self, widget, text: str):
-        tip = None
+    def _refresh_screen(self):
+        tracker = self.ctx.tracker
+        if not tracker:
+            return
 
-        def show(event):
-            nonlocal tip
-            x = widget.winfo_rootx() + 20
-            y = widget.winfo_rooty() + widget.winfo_height() + 4
-            tip = tk.Toplevel(widget)
-            tip.wm_overrideredirect(True)
-            tip.wm_geometry(f"+{x}+{y}")
-            lbl = tk.Label(tip, text=text, font=FONT_SM, bg="#FFFBE6",
-                           fg=TEXT, relief="solid", bd=1,
-                           wraplength=400, justify="left", padx=8, pady=6)
-            lbl.pack()
+        all_db_jobs   = tracker.get_all_jobs()
+        show_filtered = self._show_filtered_var.get()
 
-        def hide(event):
-            nonlocal tip
-            if tip:
-                tip.destroy()
-                tip = None
+        if show_filtered:
+            jobs = [j for j in all_db_jobs if j["status"] in
+                    ("discovered", "score_me", "scored", "filtered", "dismissed")]
+        else:
+            jobs = [j for j in all_db_jobs if j["status"] in
+                    ("discovered", "score_me", "scored")]
 
-        widget.bind("<Enter>", show)
-        widget.bind("<Leave>", hide)
+        discovered = sum(1 for j in jobs if j["status"] == "discovered")
+        scored     = sum(1 for j in jobs if j["status"] == "scored")
+        self._screen_counter.config(
+            text=f"{len(jobs)} jobs — {discovered} to review, {scored} scored")
+        self._update_screen_summary(all_db_jobs)
+
+        self._screen_all_jobs = jobs
+        self._screen_job_map  = {j["id"]: j for j in jobs}
+        self._selected_ids   &= self._screen_job_map.keys()   # drop stale selections
+
+        self._apply_screen_filter()
+
+    def _apply_screen_filter(self):
+        if not hasattr(self, "_screen_all_jobs"):
+            return
+
+        query     = self._screen_search_var.get().lower().strip()
+        high_only = self._screen_high_only.get()
+        jobs      = self._screen_all_jobs
+
+        if high_only:
+            jobs = [j for j in jobs
+                    if j.get("match_score") is not None and j["match_score"] >= 70]
+
+        if query:
+            jobs = [j for j in jobs if
+                    query in (j.get("title")       or "").lower() or
+                    query in (j.get("employer")    or "").lower() or
+                    query in (j.get("salary")      or "").lower() or
+                    query in (j.get("source")      or "").lower() or
+                    query in (j.get("location")    or "").lower() or
+                    query in (j.get("description") or "").lower()]
+
+        if self._screen_sort_col:
+            def sort_key(j):
+                v = j.get(self._screen_sort_col)
+                return (1, "") if v is None else \
+                       (0, v) if isinstance(v, (int, float)) else (0, str(v).lower())
+            jobs = sorted(jobs, key=sort_key, reverse=not self._screen_sort_asc)
+
+        self._populate_tree(jobs)
+        self._update_column_arrows()
+        self._update_screen_count()
+
+    def _populate_tree(self, jobs: list):
+        self._tree.delete(*self._tree.get_children())
+        for i, job in enumerate(jobs):
+            job_id = job["id"]
+            score  = job.get("match_score")
+            status = job.get("status", "")
+
+            match_str = f"{score}%" if score is not None else "—"
+            title     = (job.get("title")    or "—")[:60]
+            employer  = (job.get("employer") or "—")[:32]
+            salary    = (job.get("salary")   or "—")[:26]
+            source    = (job.get("source")   or "—").replace("_", " ")[:18]
+
+            if status in ("filtered", "dismissed"):
+                reason = (job.get("match_reason") or status)[:30]
+                title  = f"{title}  [{reason}]"
+                sel    = ""
+            else:
+                sel = "☑" if job_id in self._selected_ids else "☐"
+
+            self._tree.insert(
+                "", "end",
+                iid=str(job_id),
+                values=(sel, title, employer, match_str, salary, source),
+                tags=self._row_tags(job, i),
+            )
+
+    # ── Column sort ───────────────────────────────────────────────────────────
+
+    def _sort_col(self, col_key: str):
+        if self._screen_sort_col == col_key:
+            self._screen_sort_asc = not self._screen_sort_asc
+        else:
+            self._screen_sort_col = col_key
+            self._screen_sort_asc = True
+        self._apply_screen_filter()
+
+    def _update_column_arrows(self):
+        mapping = {
+            "title":       ("title",    "Role"),
+            "employer":    ("employer", "Employer"),
+            "match_score": ("match",    "Match"),
+            "salary":      ("salary",   "Salary"),
+            "source":      ("source",   "Source"),
+        }
+        for key, (col_id, label) in mapping.items():
+            arrow = ""
+            if self._screen_sort_col == key:
+                arrow = " ▲" if self._screen_sort_asc else " ▼"
+            self._tree.heading(col_id, text=label + arrow)
+
+    # ── Selection ─────────────────────────────────────────────────────────────
+
+    def _screen_select_all(self):
+        for job in self._screen_all_jobs:
+            if job.get("status") not in ("filtered", "dismissed"):
+                self._selected_ids.add(job["id"])
+        self._apply_screen_filter()
+
+    def _screen_deselect_all(self):
+        self._selected_ids.clear()
+        self._apply_screen_filter()
+
+    def _update_screen_count(self):
+        self._screen_status_label.config(text=f"{len(self._selected_ids)} selected")
+
+    def _hide_selected(self):
+        if not self._selected_ids:
+            messagebox.showinfo("Nothing selected", "Tick at least one job to hide.")
+            return
+        tracker = self.ctx.tracker
+        if not tracker:
+            return
+        for job_id in list(self._selected_ids):
+            tracker.update_status(job_id, "dismissed", "Dismissed by user in Screen Jobs")
+        self._selected_ids.clear()
+        self._refresh_screen()
+        self._update_screen_summary()
+
+    # ── Scoring summary bar ───────────────────────────────────────────────────
 
     def _update_screen_summary(self, all_db_jobs: list = None):
         if not hasattr(self, "_screen_summary_bar"):
@@ -174,7 +417,7 @@ class ScanScreen(BaseScreen):
             w.destroy()
 
         tracker = self.ctx.tracker
-        config = self.ctx.config
+        config  = self.ctx.config
         if all_db_jobs is None and tracker:
             all_db_jobs = tracker.get_all_jobs()
         if not all_db_jobs:
@@ -197,7 +440,6 @@ class ScanScreen(BaseScreen):
         bar = self._screen_summary_bar
         tk.Label(bar, text="  Scoring summary:",
                  font=(FONT_FAMILY, 10, "bold"), bg=BG2, fg=TEXT2).pack(side="left", padx=(4, 8))
-
         if high:
             tk.Label(bar, text=f"● {high} high (≥70%)",
                      font=(FONT_FAMILY, 10), bg=BG2, fg=GREEN).pack(side="left", padx=(0, 10))
@@ -214,272 +456,23 @@ class ScanScreen(BaseScreen):
             tk.Label(bar, text="— tick 'Show filtered & hidden' to reveal",
                      font=(FONT_FAMILY, 10), bg=BG2, fg=TEXT2).pack(side="left")
 
-    def _dismiss_job(self, job_id: int):
-        tracker = self.ctx.tracker
-        if not tracker:
-            return
-        tracker.update_status(job_id, "dismissed", "Dismissed by user in Screen Jobs")
-        self._screen_all_jobs = [j for j in self._screen_all_jobs if j["id"] != job_id]
-        if job_id in self._screen_vars:
-            del self._screen_vars[job_id]
-        self._apply_screen_filter()
-        self._update_screen_summary()
-
-    def _refresh_screen(self):
-        tracker = self.ctx.tracker
-        if not tracker:
-            return
-
-        for w in self._screen_inner.winfo_children():
-            w.destroy()
-        self._screen_vars.clear()
-
-        loading = tk.Label(self._screen_inner, text="⏳  Loading jobs…",
-                           font=FONT_LG, bg=BG, fg=TEXT2)
-        loading.pack(pady=60)
-        self._screen_inner.update_idletasks()
-        self._screen_canvas.update_idletasks()
-
-        show_filtered = self._show_filtered_var.get()
-
-        all_db_jobs = tracker.get_all_jobs()
-        if show_filtered:
-            jobs = [j for j in all_db_jobs if j["status"] in
-                    ("discovered", "score_me", "scored", "filtered", "dismissed")]
-        else:
-            jobs = [j for j in all_db_jobs if j["status"] in
-                    ("discovered", "score_me", "scored")]
-
-        discovered = sum(1 for j in jobs if j["status"] == "discovered")
-        scored = sum(1 for j in jobs if j["status"] == "scored")
-        self._screen_counter.config(text=f"{len(jobs)} jobs — {discovered} to review, {scored} scored")
-        self._update_screen_summary(all_db_jobs)
-
-        for w in self._screen_inner.winfo_children():
-            w.destroy()
-
-        if not jobs:
-            tk.Label(self._screen_inner,
-                     text="No jobs yet. Click 'Scan for jobs' to start.",
-                     font=FONT_SM, bg=BG, fg=TEXT2).pack(pady=40)
-            return
-
-        col_hdr = tk.Frame(self._screen_inner, bg=BG2)
-        col_hdr.pack(fill="x", pady=(0, 2))
-        tk.Label(col_hdr, text="", width=3, bg=BG2).pack(side="left")
-
-        col_defs = [
-            ("Role",     "title",        30),
-            ("Employer", "employer",     18),
-            ("Match",    "match_score",   7),
-            ("Salary",   "salary",       14),
-            ("Source",   "source",       10),
-        ]
-        for label, col_key, width in col_defs:
-            def make_sort(k=col_key):
-                def _sort():
-                    if self._screen_sort_col == k:
-                        self._screen_sort_asc = not self._screen_sort_asc
-                    else:
-                        self._screen_sort_col = k
-                        self._screen_sort_asc = True
-                    self._apply_screen_filter()
-                return _sort
-            arrow = ""
-            if self._screen_sort_col == col_key:
-                arrow = " ▲" if self._screen_sort_asc else " ▼"
-            btn = tk.Button(col_hdr, text=label + arrow, width=width, anchor="w",
-                            font=(FONT_FAMILY, 11, "bold"), bg=BG2, fg=TEXT2,
-                            relief="flat", bd=0, activebackground=BORDER,
-                            command=make_sort())
-            btn.pack(side="left")
-
-        tk.Frame(self._screen_inner, bg=BORDER, height=1).pack(fill="x")
-
-        self._screen_all_jobs = jobs
-        self._apply_screen_filter()
-
-    def _apply_screen_filter(self):
-        if not hasattr(self, "_screen_all_jobs"):
-            return
-        query = self._screen_search_var.get().lower().strip()
-        jobs = self._screen_all_jobs
-
-        if getattr(self, "_screen_high_only", tk.BooleanVar()).get():
-            jobs = [j for j in jobs if j.get("match_score") is not None and j["match_score"] >= 70]
-
-        if query:
-            jobs = [j for j in jobs if
-                    query in (j.get("title") or "").lower() or
-                    query in (j.get("employer") or "").lower() or
-                    query in (j.get("salary") or "").lower() or
-                    query in (j.get("source") or "").lower() or
-                    query in (j.get("location") or "").lower() or
-                    query in (j.get("description") or "").lower()]
-
-        if self._screen_sort_col:
-            def sort_key(j):
-                v = j.get(self._screen_sort_col)
-                if v is None:
-                    return (1, "")
-                return (0, v) if isinstance(v, (int, float)) else (0, str(v).lower())
-            jobs = sorted(jobs, key=sort_key, reverse=not self._screen_sort_asc)
-
-        existing_checks = {jid: var.get() for jid, var in self._screen_vars.items()}
-
-        children = self._screen_inner.winfo_children()
-        for w in children[2:]:
-            w.destroy()
-        self._screen_vars.clear()
-
-        if not jobs:
-            high_only = getattr(self, "_screen_high_only", tk.BooleanVar()).get()
-            msg = ("No high-scoring jobs (≥70%) found yet. Score some jobs first, or turn off the filter."
-                   if high_only else "No jobs match your search.")
-            tk.Label(self._screen_inner, text=msg,
-                     font=FONT_SM, bg=BG, fg=TEXT2).pack(pady=20)
-        else:
-            for job in jobs:
-                self._add_screen_row(job)
-                if job["id"] in existing_checks:
-                    self._screen_vars[job["id"]].set(existing_checks[job["id"]])
-
-        # Update sort arrows
-        col_defs = [("Role","title",30),("Employer","employer",18),
-                    ("Match","match_score",7),("Salary","salary",14),("Source","source",10)]
-        if children:
-            col_hdr = children[0]
-            hdr_btns = [w for w in col_hdr.winfo_children() if isinstance(w, tk.Button)]
-            for btn, (label, col_key, _) in zip(hdr_btns, col_defs):
-                arrow = ""
-                if self._screen_sort_col == col_key:
-                    arrow = " ▲" if self._screen_sort_asc else " ▼"
-                btn.config(text=label + arrow)
-
-        self._screen_status_label.config(
-            text=f"{sum(v.get() for v in self._screen_vars.values())} selected"
-        )
-        self._screen_canvas.update_idletasks()
-
-    def _add_screen_row(self, job: dict):
-        job_id  = job["id"]
-        score   = job.get("match_score")
-        status  = job.get("status", "")
-        is_filtered = status in ("filtered", "dismissed")
-
-        row_bg = BG if not is_filtered else BG2
-
-        row = tk.Frame(self._screen_inner, bg=row_bg, pady=3)
-        row.pack(fill="x")
-
-        if not is_filtered:
-            hide_btn = tk.Button(
-                row, text="✕ Hide",
-                font=(FONT_FAMILY, 9, "bold"), bg=RED_LT, fg=RED,
-                relief="flat", padx=8, pady=2,
-                activebackground="#F5CCCC", activeforeground=RED, cursor="hand2",
-                command=lambda jid=job_id: self._dismiss_job(jid)
-            )
-            hide_btn.pack(side="right", padx=(0, 8))
-
-        var = tk.BooleanVar(value=False)
-        self._screen_vars[job_id] = var
-        cb = tk.Checkbutton(row, variable=var, bg=row_bg,
-                            activebackground=row_bg,
-                            command=self._update_screen_count)
-        cb.pack(side="left", padx=(4, 0))
-
-        if score is None:
-            score_text = "—"
-            score_fg, score_bg = TEXT2, BG2
-        elif score >= 70:
-            score_text = f"{score}%"
-            score_fg, score_bg = GREEN, GREEN_LT
-        elif score >= 55:
-            score_text = f"{score}%"
-            score_fg, score_bg = AMBER, AMBER_LT
-        else:
-            score_text = f"{score}%"
-            score_fg, score_bg = RED, RED_LT
-
-        title    = (job.get("title") or "—")[:48]
-        employer = (job.get("employer") or "—")[:28]
-        salary   = (job.get("salary") or "—")[:22]
-        source   = (job.get("source") or "—").replace("_", " ")[:16]
-        url      = job.get("url") or ""
-
-        title_fg   = TEXT2 if is_filtered else BLUE
-        title_font = (FONT_FAMILY, 11, "underline") if url and not is_filtered else FONT_SM
-
-        title_lbl = tk.Label(row, text=title, width=30, anchor="w",
-                             font=title_font, bg=row_bg, fg=title_fg, cursor="hand2" if url else "")
-        title_lbl.pack(side="left")
-        if url and not is_filtered:
-            title_lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
-            title_lbl.bind("<Enter>", lambda e, l=title_lbl: l.config(fg=RED))
-            title_lbl.bind("<Leave>", lambda e, l=title_lbl: l.config(fg=title_fg))
-
-        tk.Label(row, text=employer, width=18, anchor="w", font=FONT_SM, bg=row_bg, fg=TEXT2).pack(side="left")
-
-        reason_text = (job.get("match_reason") or "").strip()
-        badge = tk.Label(row, text=score_text, font=(FONT_FAMILY, 10, "bold"),
-                         bg=score_bg, fg=score_fg, padx=6, pady=1,
-                         cursor="question_arrow" if reason_text else "")
-        badge.pack(side="left", padx=(0, 8))
-        if reason_text:
-            self._bind_tooltip(badge, reason_text)
-
-        tk.Label(row, text=salary, width=14, anchor="w", font=FONT_SM, bg=row_bg, fg=TEXT2).pack(side="left")
-        tk.Label(row, text=source, width=10, anchor="w", font=FONT_SM, bg=row_bg, fg=TEXT2).pack(side="left")
-
-        if is_filtered:
-            reason = (job.get("match_reason") or status)[:40]
-            tk.Label(row, text=f"[{reason}]", font=(FONT_FAMILY, 10), bg=row_bg, fg=TEXT2).pack(side="left", padx=8)
-
-        tk.Frame(self._screen_inner, bg=BORDER, height=1).pack(fill="x")
-
-    def _toggle_high_only(self):
-        val = not self._screen_high_only.get()
-        self._screen_high_only.set(val)
-        if val:
-            self._high_only_btn.config(bg=GREEN_LT, fg=GREEN)
-        else:
-            self._high_only_btn.config(bg=BG2, fg=TEXT)
-        self._apply_screen_filter()
-
-    def _update_screen_count(self):
-        n = sum(v.get() for v in self._screen_vars.values())
-        self._screen_status_label.config(text=f"{n} selected")
-
-    def _screen_select_all(self):
-        for var in self._screen_vars.values():
-            var.set(True)
-        self._update_screen_count()
-
-    def _screen_deselect_all(self):
-        for var in self._screen_vars.values():
-            var.set(False)
-        self._update_screen_count()
+    # ── Score ─────────────────────────────────────────────────────────────────
 
     def _score_selected(self):
-        selected_ids = [jid for jid, var in self._screen_vars.items() if var.get()]
-        if not selected_ids:
+        if not self._selected_ids:
             messagebox.showinfo("Nothing selected", "Tick at least one job to score.")
             return
 
         tracker = self.ctx.tracker
-        config = self.ctx.config
+        config  = self.ctx.config
 
-        to_score = []
-        for job_id in selected_ids:
-            job = tracker.get_job(job_id)
-            if job and job["status"] == "discovered":
-                to_score.append(job_id)
+        to_score = [jid for jid in self._selected_ids
+                    if self._screen_job_map.get(jid, {}).get("status") == "discovered"]
 
         if not to_score:
             messagebox.showinfo("Nothing to score",
                 "Selected jobs have already been scored or are filtered.\n"
-                "Only tick jobs with blue badges to score them.")
+                "Only tick jobs with no match score to score them.")
             return
 
         cost_est = len(to_score) * 0.01
@@ -487,7 +480,7 @@ class ScanScreen(BaseScreen):
             "Score jobs",
             f"Score {len(to_score)} job(s)?\n\n"
             f"Estimated cost: ~${cost_est:.2f} in Claude API credits.\n\n"
-            f"Jobs scoring below {config.min_match_score}% will be filtered automatically."
+            f"Jobs scoring below {config.min_match_score}% will be filtered automatically.",
         ):
             return
 
@@ -501,11 +494,10 @@ class ScanScreen(BaseScreen):
         self.ctx.scan_log_lines.append(
             f"── Scoring started {datetime.now().strftime('%d %b %Y %H:%M:%S')} ──"
         )
-
         append_log = self.ctx.append_log_line
 
         def score_thread():
-            capture = _LogCapture(sys.__stdout__, on_line=append_log)
+            capture    = _LogCapture(sys.__stdout__, on_line=append_log)
             old_stdout = sys.stdout
             sys.stdout = capture
             try:
@@ -528,10 +520,10 @@ class ScanScreen(BaseScreen):
         self._score_btn.config(text="📊  Score selected (~$0.01 each)",
                                state="normal", bg=BLUE)
         self._refresh_screen()
-        tracker = self.ctx.tracker
-        config = self.ctx.config
-        session = self.ctx.session
-        batch_ids = set(getattr(self, "_last_scored_ids", []))
+        tracker    = self.ctx.tracker
+        config     = self.ctx.config
+        session    = self.ctx.session
+        batch_ids  = set(getattr(self, "_last_scored_ids", []))
         batch_jobs = [tracker.get_job(jid) for jid in batch_ids if tracker.get_job(jid)]
         if session:
             session.record_scored(batch_jobs)
@@ -542,7 +534,7 @@ class ScanScreen(BaseScreen):
             high   = sum(1 for j in scored if j.get("match_score", 0) >= 70)
             medium = sum(1 for j in scored if min_score <= j.get("match_score", 0) < 70)
             low    = len(filtered)
-            lines = [f"Scoring complete — {len(scored)} job(s) passed threshold.\n"]
+            lines  = [f"Scoring complete — {len(scored)} job(s) passed threshold.\n"]
             if high:
                 lines.append(f"  ✓  {high} high match (≥70%) — strong candidates")
             if medium:
@@ -552,20 +544,18 @@ class ScanScreen(BaseScreen):
             lines.append("\nReview scores below. Tick jobs to tailor and click 'Tailor scored jobs'.")
             messagebox.showinfo("Scoring complete", "\n".join(lines))
 
+    # ── Tailor ────────────────────────────────────────────────────────────────
+
     def _tailor_selected(self):
-        selected_ids = [jid for jid, var in self._screen_vars.items() if var.get()]
-        if not selected_ids:
+        if not self._selected_ids:
             messagebox.showinfo("Nothing selected", "Tick at least one job to tailor.")
             return
 
         tracker = self.ctx.tracker
-        config = self.ctx.config
+        config  = self.ctx.config
 
-        to_tailor = []
-        for job_id in selected_ids:
-            job = tracker.get_job(job_id)
-            if job and job["status"] == "scored":
-                to_tailor.append(job_id)
+        to_tailor = [jid for jid in self._selected_ids
+                     if self._screen_job_map.get(jid, {}).get("status") == "scored"]
 
         if not to_tailor:
             messagebox.showinfo("Nothing to tailor",
@@ -578,7 +568,7 @@ class ScanScreen(BaseScreen):
             "Tailor applications",
             f"Tailor {len(to_tailor)} application(s)?\n\n"
             f"Estimated cost: ~${cost_est:.2f} in Claude API credits.\n\n"
-            f"CV and cover letter will be generated for each."
+            f"CV and cover letter will be generated for each.",
         ):
             return
 
@@ -592,11 +582,10 @@ class ScanScreen(BaseScreen):
         self.ctx.scan_log_lines.append(
             f"── Tailoring started {datetime.now().strftime('%d %b %Y %H:%M:%S')} ──"
         )
-
         append_log = self.ctx.append_log_line
 
         def tailor_thread():
-            capture = _LogCapture(sys.__stdout__, on_line=append_log)
+            capture    = _LogCapture(sys.__stdout__, on_line=append_log)
             old_stdout = sys.stdout
             sys.stdout = capture
             try:
@@ -616,13 +605,14 @@ class ScanScreen(BaseScreen):
         threading.Thread(target=tailor_thread, daemon=True).start()
 
     def _tailor_done(self):
-        self._tailor_btn.config(text="✍  Tailor selected jobs", state="normal", bg=BLUE)
+        self._tailor_btn.config(text="✍  Tailor scored jobs (~$0.05 each)",
+                                state="normal", bg=GREEN)
         self._refresh_screen()
         if self.ctx.refresh_review:
             self.ctx.refresh_review()
-        tracker = self.ctx.tracker
-        session = self.ctx.session
-        tailored_ids = set(getattr(self, "_last_tailored_ids", []))
+        tracker      = self.ctx.tracker
+        session      = self.ctx.session
+        tailored_ids  = set(getattr(self, "_last_tailored_ids", []))
         tailored_jobs = [tracker.get_job(jid) for jid in tailored_ids if tracker.get_job(jid)]
         if session:
             session.record_tailored(tailored_jobs)
@@ -632,46 +622,59 @@ class ScanScreen(BaseScreen):
             if self.ctx.show_screen:
                 self.ctx.show_screen("review")
 
+    # ── Export ────────────────────────────────────────────────────────────────
+
     def _export_screen(self):
-        if not hasattr(self, "_screen_all_jobs") or not self._screen_all_jobs:
+        if not self._screen_all_jobs:
             messagebox.showinfo("Export", "No data to export.")
             return
 
-        query = self._screen_search_var.get().lower().strip()
-        high_only = getattr(self, "_screen_high_only", tk.BooleanVar()).get()
-        jobs = self._screen_all_jobs
+        query     = self._screen_search_var.get().lower().strip()
+        high_only = self._screen_high_only.get()
+        jobs      = self._screen_all_jobs
 
         if high_only:
-            jobs = [j for j in jobs if j.get("match_score") is not None and j["match_score"] >= 70]
+            jobs = [j for j in jobs
+                    if j.get("match_score") is not None and j["match_score"] >= 70]
         if query:
             jobs = [j for j in jobs if
-                    query in (j.get("title") or "").lower() or
-                    query in (j.get("employer") or "").lower() or
-                    query in (j.get("salary") or "").lower() or
-                    query in (j.get("source") or "").lower() or
-                    query in (j.get("location") or "").lower() or
+                    query in (j.get("title")       or "").lower() or
+                    query in (j.get("employer")    or "").lower() or
+                    query in (j.get("salary")      or "").lower() or
+                    query in (j.get("source")      or "").lower() or
+                    query in (j.get("location")    or "").lower() or
                     query in (j.get("description") or "").lower()]
 
-        headers = ["ID", "Role", "Employer", "Location", "Salary", "Match %", "Status", "Source", "Found", "URL"]
-        rows = []
-        for j in jobs:
-            rows.append([
-                j.get("id"),
-                j.get("title") or "",
-                j.get("employer") or "",
-                j.get("location") or "",
-                j.get("salary") or "",
-                j.get("match_score") or "",
-                (j.get("status") or "").replace("_", " ").title(),
-                j.get("source") or "",
-                (j.get("date_found") or "")[:10],
-                j.get("url") or "",
-            ])
+        headers = ["ID", "Role", "Employer", "Location", "Salary",
+                   "Match %", "Status", "Source", "Found", "URL"]
+        rows = [[
+            j.get("id"),
+            j.get("title")    or "",
+            j.get("employer") or "",
+            j.get("location") or "",
+            j.get("salary")   or "",
+            j.get("match_score") or "",
+            (j.get("status") or "").replace("_", " ").title(),
+            j.get("source")   or "",
+            (j.get("date_found") or "")[:10],
+            j.get("url")      or "",
+        ] for j in jobs]
 
         export_to_excel(headers, rows, default_name="screen_jobs_export.xlsx")
 
+    # ── Toggle high-only ──────────────────────────────────────────────────────
+
+    def _toggle_high_only(self):
+        val = not self._screen_high_only.get()
+        self._screen_high_only.set(val)
+        self._high_only_btn.config(bg=GREEN_LT if val else BG2,
+                                   fg=GREEN    if val else TEXT)
+        self._apply_screen_filter()
+
+    # ── Refilter (called externally) ──────────────────────────────────────────
+
     def _run_refilter(self):
-        config = self.ctx.config
+        config  = self.ctx.config
         tracker = self.ctx.tracker
         if not config or not tracker:
             return
@@ -690,4 +693,5 @@ class ScanScreen(BaseScreen):
         threading.Thread(target=refilter_thread, daemon=True).start()
         if self.ctx.show_screen:
             self.ctx.show_screen("screen")
-        messagebox.showinfo("Refiltering", "Re-applying filters to discovered jobs...\nThe list will update when done.")
+        messagebox.showinfo("Refiltering",
+            "Re-applying filters to discovered jobs...\nThe list will update when done.")
