@@ -111,7 +111,7 @@ class Config:
     search_radius_miles: int = 5
     include_remote:     bool = True
     max_job_age_days:   int  = 5
-    min_salary_gbp:     int  = 25000
+    min_salary_gbp:     int  = 30000
     max_salary_gbp:     int  = 0      # 0 = no upper limit
 
     # ── Scoring ───────────────────────────────────────────────────────────────

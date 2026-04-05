@@ -313,7 +313,9 @@ class ScanScreen(BaseScreen):
                     query in (j.get("title") or "").lower() or
                     query in (j.get("employer") or "").lower() or
                     query in (j.get("salary") or "").lower() or
-                    query in (j.get("source") or "").lower()]
+                    query in (j.get("source") or "").lower() or
+                    query in (j.get("location") or "").lower() or
+                    query in (j.get("description") or "").lower()]
 
         if self._screen_sort_col:
             def sort_key(j):
@@ -357,6 +359,7 @@ class ScanScreen(BaseScreen):
         self._screen_status_label.config(
             text=f"{sum(v.get() for v in self._screen_vars.values())} selected"
         )
+        self._screen_canvas.update_idletasks()
 
     def _add_screen_row(self, job: dict):
         job_id  = job["id"]
@@ -645,7 +648,9 @@ class ScanScreen(BaseScreen):
                     query in (j.get("title") or "").lower() or
                     query in (j.get("employer") or "").lower() or
                     query in (j.get("salary") or "").lower() or
-                    query in (j.get("source") or "").lower()]
+                    query in (j.get("source") or "").lower() or
+                    query in (j.get("location") or "").lower() or
+                    query in (j.get("description") or "").lower()]
 
         headers = ["ID", "Role", "Employer", "Location", "Salary", "Match %", "Status", "Source", "Found", "URL"]
         rows = []
