@@ -26,7 +26,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import Config, USER_PREFS_PATH
 from tracker import ApplicationTracker
-from ui.constants import _LogCapture
+from log_capture import _LogCapture
+from session_log import SessionLog
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(title="Job Agent")
@@ -39,6 +40,7 @@ templates = Jinja2Templates(directory=str(_SRC / "templates"))
 # ── Shared state ──────────────────────────────────────────────────────────────
 _config:  Optional[Config]               = None
 _tracker: Optional[ApplicationTracker]  = None
+_session: Optional[SessionLog]          = None
 _log_lines: deque                        = deque(maxlen=500)
 _ws_queues: list                         = []   # one asyncio.Queue per WS client
 _loop:    Optional[asyncio.AbstractEventLoop] = None
@@ -48,10 +50,22 @@ _task_running  = False
 
 @app.on_event("startup")
 async def _startup():
-    global _config, _tracker, _loop
+    global _config, _tracker, _session, _loop
     _loop    = asyncio.get_event_loop()
     _config  = Config()
     _tracker = ApplicationTracker(_config.db_path)
+    _session = SessionLog()
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    """Send session summary email when the server stops (Ctrl-C / SIGTERM)."""
+    if _session and _session.has_activity() and _config:
+        sent = await asyncio.to_thread(_session.send_summary, _config)
+        if sent:
+            print("[Session Log] Summary email sent on shutdown.")
+        else:
+            print("[Session Log] Summary email skipped (no SMTP config or send failed).")
 
 
 # ── Log helpers ───────────────────────────────────────────────────────────────
@@ -89,7 +103,7 @@ async def ws_logs(websocket: WebSocket):
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -322,6 +336,9 @@ async def score_jobs(data: dict):
             from main import run_score_selected
             _run_in_capture(run_score_selected, _config, _tracker)
             _append_log("── Scoring complete ──")
+            if _session:
+                scored = [_tracker.get_job(i) for i in ids]
+                _session.record_scored([j for j in scored if j])
         except Exception as e:
             _append_log(f"ERROR: {e}")
         finally:
@@ -352,6 +369,9 @@ async def tailor_jobs(data: dict):
             from main import run_tailor_approved
             _run_in_capture(run_tailor_approved, _config, _tracker)
             _append_log("── Tailoring complete ──")
+            if _session:
+                tailored = [_tracker.get_job(i) for i in ids]
+                _session.record_tailored([j for j in tailored if j])
         except Exception as e:
             _append_log(f"ERROR: {e}")
         finally:
@@ -396,6 +416,9 @@ async def add_job_by_url(data: dict):
                 _tracker.update_status(jid, "tailoring", "Auto-tailor on add")
                 from main import run_tailor_approved
                 _run_in_capture(run_tailor_approved, _config, _tracker)
+                if _session:
+                    j = _tracker.get_job(jid)
+                    if j: _session.record_tailored([j])
         except Exception as e:
             _append_log(f"ERROR adding job: {e}")
             result["error"] = str(e)
@@ -406,6 +429,228 @@ async def add_job_by_url(data: dict):
     if "error" in result:
         raise HTTPException(500, result["error"])
     return {"status": "added", "job_id": result.get("job_id")}
+
+
+# ── Add job by description (paste) ───────────────────────────────────────────
+
+@app.post("/api/jobs/add-description")
+async def add_job_by_description(data: dict):
+    global _task_running
+    title       = (data.get("title")       or "").strip()
+    employer    = (data.get("employer")    or "").strip()
+    description = (data.get("description") or "").strip()
+    if not title or not employer or not description:
+        raise HTTPException(400, "title, employer and description are required")
+
+    if _task_running:
+        raise HTTPException(409, "A task is already running")
+
+    _task_running = True
+    result: dict = {}
+
+    def _do():
+        global _task_running
+        try:
+            import hashlib, time as _t
+            pseudo_url = f"manual://{employer.lower().replace(' ','-')}/{hashlib.md5(description.encode()).hexdigest()[:8]}"
+            if _tracker.job_exists(pseudo_url):
+                result["error"] = "Job already tracked"
+                return
+            job = {
+                "title":       title,
+                "employer":    employer,
+                "url":         pseudo_url,
+                "description": description,
+                "source":      "manual",
+                "location":    data.get("location") or "",
+                "salary":      data.get("salary")   or "",
+            }
+            jid = _tracker.add_job(job)
+            result["job_id"] = jid
+            _tracker.update_status(jid, "tailoring", "Added via web UI — tailoring")
+            _append_log(f"── Tailoring: {title} @ {employer} ──")
+            from main import run_tailor_approved
+            _run_in_capture(run_tailor_approved, _config, _tracker)
+            _append_log("── Tailoring complete ──")
+            if _session:
+                j = _tracker.get_job(jid)
+                if j: _session.record_tailored([j])
+        except Exception as e:
+            _append_log(f"ERROR: {e}")
+            result["error"] = str(e)
+        finally:
+            _task_running = False
+
+    await asyncio.to_thread(_do)
+    if "error" in result:
+        raise HTTPException(500, result["error"])
+    return {"status": "added", "job_id": result.get("job_id")}
+
+
+# ── Open folder / file in Finder ─────────────────────────────────────────────
+
+@app.post("/api/open-folder")
+async def open_folder(data: dict):
+    """Create the folder if it doesn't exist, then reveal it in Finder."""
+    path_str = (data.get("path") or "").strip()
+    if not path_str:
+        raise HTTPException(400, "path required")
+    p = Path(path_str).expanduser().resolve()
+    p.mkdir(parents=True, exist_ok=True)
+    import subprocess as _sp, platform as _pl
+    if _pl.system() == "Darwin":
+        _sp.Popen(["open", str(p)])
+    elif _pl.system() == "Linux":
+        _sp.Popen(["xdg-open", str(p)])
+    return {"status": "ok", "path": str(p)}
+
+
+@app.post("/api/jobs/{job_id}/open-file")
+async def open_file(job_id: int, data: dict):
+    """Open the tailored CV or cover letter in the default app."""
+    which = data.get("which", "cv")
+    if not _tracker:
+        raise HTTPException(503, "Not ready")
+    job = _tracker.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Not found")
+    key  = "tailored_cv_path" if which == "cv" else "cover_letter_path"
+    path_str = job.get(key) or ""
+    if not path_str or not Path(path_str).exists():
+        raise HTTPException(404, f"File not found: {path_str or '(no path)'}")
+    import subprocess as _sp, platform as _pl
+    if _pl.system() == "Darwin":
+        _sp.Popen(["open", path_str])
+    elif _pl.system() == "Linux":
+        _sp.Popen(["xdg-open", path_str])
+    return {"status": "ok", "path": path_str}
+
+
+# ── Auto-apply ────────────────────────────────────────────────────────────────
+
+@app.post("/api/jobs/{job_id}/apply/reed")
+async def apply_reed(job_id: int):
+    global _task_running
+    if _task_running:
+        raise HTTPException(409, "A task is already running")
+    if not _tracker:
+        raise HTTPException(503, "Not ready")
+    job = _tracker.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    _task_running = True
+    result: dict = {}
+
+    def _do():
+        global _task_running
+        try:
+            from reed_apply import ReedApplicant, ReedExternalApplyError
+            applicant = ReedApplicant(_config, headless=False)
+            submitted = applicant.apply(job)
+            if submitted:
+                _tracker.update_status(job_id, "submitted", "Auto-submitted via Reed apply")
+                result["submitted"] = True
+                _append_log(f"✓ Reed application submitted: {job.get('title')} @ {job.get('employer')}")
+                if _session: _session.record_apply(job, "reed", True)
+            else:
+                result["submitted"] = False
+                _append_log(f"⊘ Reed apply: browser opened but not submitted automatically")
+                if _session: _session.record_apply(job, "reed", False)
+        except ReedExternalApplyError:
+            result["submitted"] = False
+            result["external"] = True
+            if _session: _session.record_apply(job, "reed", False)
+            _append_log(f"⊘ Reed apply: external application site — auto-apply not available")
+            # Persist the flag so the UI shows "not available" on next render
+            import json as _json
+            existing_raw = job.get("raw_data") or "{}"
+            try:
+                raw = _json.loads(existing_raw)
+            except Exception:
+                raw = {}
+            raw["reed_external"] = True
+            with _tracker._connect() as conn:
+                conn.execute(
+                    "UPDATE jobs SET raw_data=? WHERE id=?",
+                    (_json.dumps(raw), job_id),
+                )
+        except Exception as e:
+            _append_log(f"ERROR (Reed apply): {e}")
+            result["error"] = str(e)
+        finally:
+            _task_running = False
+
+    await asyncio.to_thread(_do)
+    if "error" in result:
+        raise HTTPException(500, result["error"])
+    return result
+
+
+@app.post("/api/jobs/{job_id}/apply/linkedin")
+async def apply_linkedin(job_id: int):
+    global _task_running
+    if _task_running:
+        raise HTTPException(409, "A task is already running")
+    if not _tracker:
+        raise HTTPException(503, "Not ready")
+    job = _tracker.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    _task_running = True
+    result: dict = {}
+
+    def _do():
+        global _task_running
+        try:
+            from linkedin_apply import LinkedInApplicant
+            applicant = LinkedInApplicant(_config, headless=False)
+            submitted = applicant.apply(job)
+            if submitted:
+                _tracker.update_status(job_id, "submitted", "Auto-submitted via LinkedIn Easy Apply")
+                result["submitted"] = True
+                _append_log(f"✓ LinkedIn application submitted: {job.get('title')} @ {job.get('employer')}")
+                if _session: _session.record_apply(job, "linkedin", True)
+            else:
+                result["submitted"] = False
+                _append_log(f"⊘ LinkedIn apply: browser opened but not submitted automatically")
+                if _session: _session.record_apply(job, "linkedin", False)
+        except Exception as e:
+            _append_log(f"ERROR (LinkedIn apply): {e}")
+            result["error"] = str(e)
+        finally:
+            _task_running = False
+
+    await asyncio.to_thread(_do)
+    if "error" in result:
+        raise HTTPException(500, result["error"])
+    return result
+
+
+# ── Session summary email ─────────────────────────────────────────────────────
+
+@app.get("/api/session")
+async def session_stats():
+    if not _session:
+        return {"scored": 0, "tailored": 0, "applied": 0, "has_activity": False}
+    return {
+        "scored":       len(_session.scored),
+        "tailored":     len(_session.tailored),
+        "applied":      len(_session.applied),
+        "has_activity": _session.has_activity(),
+        "estimated_cost": round(_session.estimated_cost(), 2),
+    }
+
+
+@app.post("/api/session/send-summary")
+async def send_summary():
+    if not _session:
+        raise HTTPException(503, "Not ready")
+    if not _session.has_activity():
+        return {"status": "nothing to send"}
+    sent = await asyncio.to_thread(_session.send_summary, _config)
+    if sent:
+        return {"status": "sent"}
+    raise HTTPException(500, "Email failed — check SMTP settings in Setup")
 
 
 # ── Export (returns JSON — SheetJS handles XLSX client-side) ──────────────────
