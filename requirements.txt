@@ -10,3 +10,9 @@ pytest-mock>=3.12.0
 weasyprint
 playwright>=1.40.0
 openpyxl>=3.1.0
+# Web UI
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+jinja2>=3.1.0
+websockets>=12.0
