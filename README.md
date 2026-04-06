@@ -88,19 +88,19 @@ Tips for best results:
 
 **Never commit `base_cv.md`** — it is gitignored.
 
-### Step 5 — Run the GUI
+### Step 5 — Launch the web UI
 
 ```bash
-python src/app.py
+python run_web.py
 ```
 
-Or use the built `.app` on macOS.
+Or double-click **Job Agent.command** on macOS — it opens the browser automatically.
 
 ---
 
-## GUI Screens
+## Web UI Screens
 
-The app is a Tkinter desktop GUI. All screens are accessible from the left sidebar.
+The app runs in your browser. All screens are accessible from the left sidebar.
 
 | Screen | Purpose |
 |--------|---------|
@@ -109,12 +109,11 @@ The app is a Tkinter desktop GUI. All screens are accessible from the left sideb
 | **Add by description** | Paste a job description from an email, generate CV + cover letter instantly |
 | **Review queue** | Read each tailored CV and cover letter, approve or skip |
 | **Settings** | Edit search keywords, salary range, match threshold, session email |
-| **Setup** | Upload CV/cover letter templates, enter candidate details |
-| **Scan log** | Live output from the last scan or tailoring run |
+| **Setup** | Enter candidate details, API keys, output folder |
+| **Live log** | Live output from the last scan or tailoring run |
 | **Database** | Browse and search all jobs in the SQLite database, export to Excel |
-| **Info** | App version and help links |
 
-The **Scan for jobs** button at the bottom of the sidebar runs a full scan across all configured job boards.
+The **Scan for jobs** button in the Dashboard runs a full scan across all configured job boards.
 
 ---
 
@@ -136,18 +135,8 @@ When done you are prompted to go to the Review queue to check the output.
 ## Architecture
 
 ```
-src/app.py                   ← GUI entry point (runs JobAgentShell)
-src/ui/app_shell.py          ← Top-level window, sidebar, screen router
-src/ui/screens/
-  dashboard.py               ← Application overview + status badges
-  scan.py                    ← Screen jobs: score and tailor from job board results
-  add_job.py                 ← Add job by pasting a description
-  review.py                  ← Review queue: approve or skip tailored applications
-  settings.py                ← Search config, salary range, score threshold, email
-  setup.py                   ← Candidate details, CV upload
-  log.py                     ← Live scan/tailor log
-  database.py                ← Browse all jobs, export to Excel
-  info.py                    ← Help and version info
+src/api/app.py               ← FastAPI server (REST + WebSocket endpoints)
+src/templates/index.html     ← Single-page web UI (Bootstrap 5, ag-Grid, SheetJS)
 src/main.py                  ← Orchestrator (also usable as CLI)
 src/config.py                ← All settings (loaded from .env + user prefs)
 src/job_scanner.py           ← Scans Reed, Adzuna, Civil Service, Guardian, LinkedIn, W4MP, CharityJob

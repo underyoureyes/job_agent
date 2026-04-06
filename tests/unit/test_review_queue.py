@@ -262,3 +262,134 @@ class TestOpenFiles:
              patch('platform.system', return_value="Windows"):
             queue._open_files(str(cv), None)
         assert mock_run.call_count == 1
+
+
+# ── Reed and LinkedIn apply helpers ───────────────────────────────────────────
+
+class TestApplyHelpers:
+
+    def test_apply_on_reed_submitted(self, queue, tracker, tmp_path):
+        job_id = tracker.add_job({
+            "title": "Policy Analyst", "employer": "CO", "location": "London",
+            "salary": "£40,000", "url": "https://www.reed.co.uk/jobs/1",
+            "description": "", "source": "reed", "date_closes": "",
+            "match_score": 75, "match_reason": "ok",
+        })
+        (tmp_path / "cv.docx").write_text("CV")
+        tracker.update_documents(job_id, str(tmp_path / "cv.docx"), "")
+        job = tracker.get_job(job_id)
+        mock_applicant = MagicMock()
+        mock_applicant.apply.return_value = True
+        with patch('review_queue.ReedApplicant', return_value=mock_applicant):
+            queue._apply_on_reed(job)
+        assert tracker.get_job(job_id)["status"] == "submitted"
+
+    def test_apply_on_reed_not_submitted(self, queue, tracker, tmp_path):
+        job_id = tracker.add_job({
+            "title": "Policy Analyst", "employer": "CO", "location": "London",
+            "salary": "£40,000", "url": "https://www.reed.co.uk/jobs/2",
+            "description": "", "source": "reed", "date_closes": "",
+            "match_score": 75, "match_reason": "ok",
+        })
+        tracker.update_documents(job_id, "", "")
+        job = tracker.get_job(job_id)
+        mock_applicant = MagicMock()
+        mock_applicant.apply.return_value = False
+        with patch('review_queue.ReedApplicant', return_value=mock_applicant):
+            queue._apply_on_reed(job)
+        # Status unchanged — still tailored/pending
+        assert tracker.get_job(job_id)["status"] != "submitted"
+
+    def test_apply_on_reed_error_no_crash(self, queue, tracker, tmp_path):
+        job_id = tracker.add_job({
+            "title": "Policy Analyst", "employer": "CO", "location": "London",
+            "salary": "£40,000", "url": "https://www.reed.co.uk/jobs/3",
+            "description": "", "source": "reed", "date_closes": "",
+            "match_score": 75, "match_reason": "ok",
+        })
+        tracker.update_documents(job_id, "", "")
+        job = tracker.get_job(job_id)
+        from reed_apply import ReedApplyError
+        with patch('review_queue.ReedApplicant', side_effect=ReedApplyError("failed")):
+            queue._apply_on_reed(job)  # should not raise
+
+    def test_apply_on_linkedin_submitted(self, queue, tracker, tmp_path):
+        job_id = tracker.add_job({
+            "title": "Policy Analyst", "employer": "CO", "location": "London",
+            "salary": "£40,000", "url": "https://www.linkedin.com/jobs/1",
+            "description": "", "source": "linkedin", "date_closes": "",
+            "match_score": 75, "match_reason": "ok",
+        })
+        (tmp_path / "cv.docx").write_text("CV")
+        tracker.update_documents(job_id, str(tmp_path / "cv.docx"), "")
+        job = tracker.get_job(job_id)
+        mock_applicant = MagicMock()
+        mock_applicant.apply.return_value = True
+        with patch('review_queue.LinkedInApplicant', return_value=mock_applicant):
+            queue._apply_on_linkedin(job)
+        assert tracker.get_job(job_id)["status"] == "submitted"
+
+    def test_apply_on_linkedin_error_no_crash(self, queue, tracker, tmp_path):
+        job_id = tracker.add_job({
+            "title": "Policy Analyst", "employer": "CO", "location": "London",
+            "salary": "£40,000", "url": "https://www.linkedin.com/jobs/2",
+            "description": "", "source": "linkedin", "date_closes": "",
+            "match_score": 75, "match_reason": "ok",
+        })
+        tracker.update_documents(job_id, "", "")
+        job = tracker.get_job(job_id)
+        from linkedin_apply import LinkedInApplyError
+        with patch('review_queue.LinkedInApplicant', side_effect=LinkedInApplyError("failed")):
+            queue._apply_on_linkedin(job)  # should not raise
+
+
+# ── review_one — Reed and LinkedIn choices ────────────────────────────────────
+
+class TestReviewOneApplyChoices:
+
+    def _add_reed_job(self, tracker, tmp_path):
+        job_id = tracker.add_job({
+            "title": "Policy Analyst", "employer": "CO", "location": "London",
+            "salary": "£40,000", "url": "https://www.reed.co.uk/jobs/99",
+            "description": "", "source": "reed", "date_closes": "",
+            "match_score": 75, "match_reason": "ok",
+        })
+        cv = tmp_path / "cv.docx"
+        cv.write_text("CV")
+        tracker.update_documents(job_id, str(cv), "")
+        return job_id
+
+    def test_choice_r_triggers_reed_apply(self, queue, tracker, tmp_path):
+        job_id = self._add_reed_job(tracker, tmp_path)
+        job = tracker.get_job(job_id)
+        with patch.object(queue, '_apply_on_reed') as mock_reed, \
+             patch('rich.prompt.Prompt.ask', return_value="r"):
+            result = queue._review_one(job)
+        mock_reed.assert_called_once()
+        assert result == "approved"
+
+    def test_choice_l_triggers_linkedin_apply(self, queue, tracker, tmp_path):
+        # Add a LinkedIn easy-apply job
+        import json
+        job_id = tracker.add_job({
+            "title": "Policy Analyst", "employer": "CO", "location": "London",
+            "salary": "£40,000", "url": "https://www.linkedin.com/jobs/99",
+            "description": "", "source": "linkedin", "date_closes": "",
+            "match_score": 75, "match_reason": "ok",
+        })
+        cv = tmp_path / "cv.docx"
+        cv.write_text("CV")
+        tracker.update_documents(job_id, str(cv), "")
+        # Store easy_apply flag so is_linkedin branch is taken
+        import sqlite3
+        with sqlite3.connect(tracker.db_path) as conn:
+            conn.execute(
+                "UPDATE jobs SET raw_data = ? WHERE id = ?",
+                (json.dumps({"easy_apply": True}), job_id)
+            )
+        job = tracker.get_job(job_id)
+        with patch.object(queue, '_apply_on_linkedin') as mock_li, \
+             patch('rich.prompt.Prompt.ask', return_value="l"):
+            result = queue._review_one(job)
+        mock_li.assert_called_once()
+        assert result == "approved"

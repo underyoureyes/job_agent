@@ -187,13 +187,6 @@ class TestScoreOnly:
 
 class TestProcessJob:
 
-    @pytest.fixture(autouse=True)
-    def no_pdf(self):
-        with patch('doc_generator.DocGenerator._try_weasyprint', return_value=False), \
-             patch('doc_generator.DocGenerator._try_libreoffice', return_value=False), \
-             patch('doc_generator.DocGenerator._try_applescript_word', return_value=False):
-            yield
-
     def test_process_job_missing_base_cv_returns_false(self, cfg, tracker):
         cfg.base_cv_path = cfg.base_dir / "missing.md"
         job = _job()

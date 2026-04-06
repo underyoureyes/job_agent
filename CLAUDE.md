@@ -25,22 +25,15 @@ This file defines how Claude should structure, organise, and develop Python proj
 project_root/
 ├── src/
 │   ├── main.py               # CLI orchestrator (argparse subcommands)
-│   ├── app.py                # GUI entry point (launches Tkinter shell)
 │   ├── config.py             # Central Config dataclass + .env loading
 │   ├── conftest.py           # Pytest fixtures
 │   ├── tracker.py            # SQLite wrapper (one class, one file)
+│   ├── log_capture.py        # Stdout capture for live WebSocket log streaming
 │   ├── <domain>.py           # Core domain modules (scanner, processor, etc.)
-│   └── ui/                   # Desktop (Tkinter) layout:
-│       ├── app_shell.py      #   Top-level Tk window, sidebar, screen router
-│       ├── context.py        #   AppContext dataclass (shared state)
-│       ├── constants.py      #   Colours, fonts, ANSI stripping, ttk styles
-│       ├── utils.py          #   UI helpers (file open, export, etc.)
-│       ├── widgets.py        #   Reusable custom Tkinter widgets
-│       └── screens/
-│           ├── base.py       #   BaseScreen parent class
-│           └── <name>.py     #   One file per screen
-│                             # Web (Flask/FastAPI) layout instead:
-│                             #   routes/<domain>.py, templates/, static/
+│   ├── api/
+│   │   └── app.py            # FastAPI server — REST + WebSocket endpoints
+│   └── templates/
+│       └── index.html        # Single-page web UI (Bootstrap 5, ag-Grid, SheetJS)
 ├── tests/
 │   ├── unit/
 │   │   └── test_<module>.py
@@ -74,22 +67,13 @@ Always keep these three layers cleanly separated:
 - Domain classes (`Scanner`, `Tailor`, etc.) receive `Config` in their constructor
 - Free/cheap operations always run before expensive ones (e.g. API calls)
 
-### 3. UI Layer
-The UI approach depends on the project type — both are valid:
-
-**Desktop (Tkinter):**
-- `app_shell.py` owns the window, sidebar, and screen routing
-- Each screen inherits `BaseScreen` and lives in its own file in `screens/`
-- Shared state passes through `AppContext` — never globals
-
-**Web (Flask / FastAPI + HTML):**
-- `app.py` is the Flask/FastAPI entry point
-- Routes in `routes/` or grouped by domain (`routes/jobs.py`, `routes/settings.py`)
+### 3. UI Layer (FastAPI + HTML)
+- `api/app.py` is the FastAPI entry point
+- Routes grouped by domain within `api/app.py`
 - Templates in `templates/`, static assets in `static/`
 - JSON API endpoints return consistent `{"data": ..., "error": null}` envelopes
-- Use server-sent events or polling for live progress updates
-
-In both cases: **UI never talks to the DB directly — it calls Tracker/service methods.**
+- WebSocket at `/ws/logs` for live task output streaming
+- **UI never talks to the DB directly — it calls Tracker/service methods.**
 
 ---
 
@@ -138,7 +122,7 @@ class Config:
 |---|---|---|
 | Files | `snake_case.py` | `job_scanner.py` |
 | Classes | `PascalCase` | `JobScanner`, `CVTailor` |
-| Screen classes | `PascalCase` + `Screen` suffix | `DashboardScreen` |
+| API route functions | `snake_case` verb | `get_jobs()`, `start_scan()` |
 | Methods | `snake_case` | `scan_all()`, `get_jobs_by_status()` |
 | Private methods | `_underscore_prefix` | `_is_too_senior()`, `_build_sidebar()` |
 | Constants | `ALL_CAPS` | `BG`, `SCORE_PROMPT`, `STATUS_COLOURS` |
@@ -180,56 +164,19 @@ STATUS_COLOURS = {"discovered": "cyan", "approved": "green", "submitted": "blue"
 
 ---
 
-## UI Patterns (Tkinter)
+## UI Patterns (Web)
 
-### AppContext
-```python
-@dataclass
-class AppContext:
-    config: Config
-    tracker: ApplicationTracker
-    show_screen: callable = None     # screen routing callback
-    refresh_dashboard: callable = None
-```
-
-### BaseScreen
-```python
-class BaseScreen(tk.Frame):
-    def __init__(self, parent: tk.Frame, ctx: AppContext):
-        super().__init__(parent, bg=BG)
-        self.ctx = ctx
-        self._build(self)
-
-    def _build(self, parent): ...   # override to create widgets
-    def refresh(self): ...          # called when screen becomes active
-```
-
-### Layout rules
-- `pack()` for most layouts; `grid()` only when tabular alignment is needed
-- Sidebar navigation with one button per screen
-- `ttk.Treeview` for tabular data (with scrollbars)
-- `ttk.Notebook` for tabbed views
-- Always configure ttk styles centrally in `constants.py`
+### API conventions
+- All endpoints return JSON; errors use `HTTPException` with a detail string
+- Background tasks run via `asyncio.to_thread()` with a global `_task_running` flag
+- Live log output is streamed over WebSocket (`/ws/logs`) using `_LogCapture`
+- State (config, tracker, session) held in module-level globals set at startup
 
 ### Threading
-Long-running operations (scans, API calls) run in threads:
+Long-running operations (scans, API calls) run in a thread pool:
 ```python
-threading.Thread(target=self._run_scan, daemon=True).start()
-```
-Update UI from threads via `self.after(0, callback)`.
-
-### Colours & fonts
-All defined in `constants.py`:
-```python
-BG, BG2, CARD = "#1e1e2e", "#2a2a3d", "#2e2e45"
-TEXT, TEXT2   = "#e0e0f0", "#9090b0"
-BLUE, GREEN   = "#5c9cf5", "#4caf74"
-AMBER, RED    = "#f5a623", "#e05c5c"
-
-FONT    = ("SF Pro Display", 12)         # macOS; auto-detect platform
-FONT_SM = ("SF Pro Display", 10)
-FONT_LG = ("SF Pro Display", 14)
-FONT_HEAD = ("SF Pro Display", 18, "bold")
+asyncio.create_task(asyncio.to_thread(_do))   # fire-and-forget
+await asyncio.to_thread(_do)                  # wait for result
 ```
 
 ---
@@ -380,6 +327,6 @@ NOTIFY_EMAIL=
 5. **Audit trail**: Every status transition recorded in an events table.
 6. **Graceful degradation**: Missing API keys disable features; no crashes.
 7. **UI flexibility**: Use Tkinter for desktop tools, Flask/FastAPI + HTML for web apps — choose what fits the project, apply the same layering rules either way.
-8. **Testable by design**: Dependency injection via Config/AppContext; DB path injectable via constructor.
+8. **Testable by design**: Dependency injection via Config; DB path injectable via constructor.
 9. **No hidden costs**: Show users what will cost money before triggering it.
 10. **Rich output**: All CLI output uses Rich for readable, colour-coded terminal display.

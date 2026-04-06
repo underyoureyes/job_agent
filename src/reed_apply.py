@@ -29,6 +29,10 @@ def _extract_text_from_docx(docx_path: str) -> str:
 class ReedApplyError(Exception):
     pass
 
+class ReedExternalApplyError(ReedApplyError):
+    """Raised when the Reed job's apply button redirects to an external site."""
+    pass
+
 
 class ReedApplicant:
     """
@@ -187,7 +191,7 @@ class ReedApplicant:
         if href and not href.startswith("/") and "reed.co.uk" not in href:
             print(f"[Reed Apply] This job links to an external application site:\n  {href}")
             print("[Reed Apply] External applications cannot be auto-filled.")
-            return False
+            raise ReedExternalApplyError(f"External application URL: {href}")
 
         print("[Reed Apply] Clicking Apply...")
         apply_btn.click()

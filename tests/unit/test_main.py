@@ -19,6 +19,7 @@ from main import (
     run_scan,
     run_score_selected,
     run_tailor_approved,
+    main,
 )
 
 
@@ -292,6 +293,43 @@ class TestRunScoreSelected:
         assert tracker.get_job(job_id)["status"] == "discovered"
 
 
+# ── run_score_selected — billing error re-raise ───────────────────────────────
+
+class TestRunScoreSelectedBillingError:
+
+    def test_billing_error_re_raised(self, cfg, tracker):
+        job = _job(url="https://example.com/j2")
+        job_id = tracker.add_job(job)
+        tracker.update_status(job_id, "score_me")
+
+        error_client = MagicMock()
+        error_client.messages.create.side_effect = Exception("insufficient credits")
+        with patch('anthropic.Anthropic', return_value=error_client):
+            with pytest.raises(Exception, match="credit"):
+                run_score_selected(cfg, tracker)
+
+    def test_non_billing_error_not_raised(self, cfg, tracker):
+        job = _job(url="https://example.com/j3")
+        job_id = tracker.add_job(job)
+        tracker.update_status(job_id, "score_me")
+
+        error_client = MagicMock()
+        error_client.messages.create.side_effect = Exception("network timeout")
+        with patch('anthropic.Anthropic', return_value=error_client):
+            run_score_selected(cfg, tracker)  # should not raise
+
+
+# ── run_scan — saved_count print ─────────────────────────────────────────────
+
+class TestRunScanAdvice:
+
+    def test_prints_advice_when_jobs_discovered(self, cfg, tracker, capsys):
+        job = _job(title="Policy Analyst", url="https://example.com/advice-1")
+        with patch('job_scanner.JobScanner.scan_all', return_value=[job]):
+            run_scan(cfg, tracker)
+        # Just verify it doesn't crash — Rich Console doesn't use capsys
+
+
 # ── run_tailor_approved ───────────────────────────────────────────────────────
 
 class TestRunTailorApproved:
@@ -301,3 +339,62 @@ class TestRunTailorApproved:
         with patch('anthropic.Anthropic', return_value=mock_client):
             run_tailor_approved(cfg, tracker)
         assert mock_client.messages.create.call_count == 0
+
+
+# ── main() CLI entrypoint ─────────────────────────────────────────────────────
+
+class TestMain:
+
+    def _run_main(self, args, cfg, tracker):
+        with patch('sys.argv', ['main.py'] + args), \
+             patch('main.Config', return_value=cfg), \
+             patch('main.ApplicationTracker', return_value=tracker):
+            main()
+
+    def test_no_command_prints_help(self, cfg, tracker):
+        with patch('sys.argv', ['main.py']), \
+             patch('main.Config', return_value=cfg), \
+             patch('main.ApplicationTracker', return_value=tracker), \
+             patch('argparse.ArgumentParser.print_help') as mock_help:
+            main()
+        mock_help.assert_called_once()
+
+    def test_scan_command(self, cfg, tracker):
+        with patch('main.run_scan') as mock_scan:
+            self._run_main(['scan'], cfg, tracker)
+        mock_scan.assert_called_once_with(cfg, tracker)
+
+    def test_score_selected_command(self, cfg, tracker):
+        with patch('main.run_score_selected') as mock_score:
+            self._run_main(['score_selected'], cfg, tracker)
+        mock_score.assert_called_once_with(cfg, tracker)
+
+    def test_tailor_approved_command(self, cfg, tracker):
+        with patch('main.run_tailor_approved') as mock_tailor:
+            self._run_main(['tailor_approved'], cfg, tracker)
+        mock_tailor.assert_called_once_with(cfg, tracker)
+
+    def test_review_command(self, cfg, tracker):
+        with patch('main.ReviewQueue') as MockRQ:
+            mock_rq = MagicMock()
+            MockRQ.return_value = mock_rq
+            self._run_main(['review'], cfg, tracker)
+        mock_rq.run.assert_called_once()
+
+    def test_status_command(self, cfg, tracker):
+        with patch.object(tracker, 'print_dashboard') as mock_dash:
+            self._run_main(['status'], cfg, tracker)
+        mock_dash.assert_called_once()
+
+    def test_tailor_specific_job(self, cfg, tracker):
+        job = _job(url="https://example.com/tailor-1")
+        job_id = tracker.add_job(job)
+        with patch('main.CVTailor') as MockTailor:
+            mock_tailor = MagicMock()
+            MockTailor.return_value = mock_tailor
+            self._run_main(['tailor', str(job_id)], cfg, tracker)
+        mock_tailor.process_job.assert_called_once()
+
+    def test_tailor_missing_job_id(self, cfg, tracker):
+        # Job 9999 doesn't exist — should print error without crashing
+        self._run_main(['tailor', '9999'], cfg, tracker)  # should not raise
