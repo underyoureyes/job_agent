@@ -309,15 +309,6 @@ class CVTailor:
                 )
                 console.print(f"    [dim]→ .docx files created[/dim]")
 
-                # Convert to PDF
-                cv_pdf = cv_gen.convert_to_pdf(cv_docx_path)
-                letter_pdf = letter_gen.convert_to_pdf(letter_docx_path)
-                if cv_pdf or letter_pdf:
-                    console.print(f"    [dim]→ PDF files created[/dim]")
-                else:
-                    console.print(f"    [yellow]→ PDF conversion unavailable (install LibreOffice or docx2pdf)[/yellow]")
-
-                # Use docx as the primary tracked path
                 primary_cv = str(cv_docx_path)
                 primary_letter = str(letter_docx_path)
 

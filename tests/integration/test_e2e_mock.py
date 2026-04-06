@@ -422,15 +422,6 @@ class TestPhase2Score:
 
 class TestPhase3Tailor:
 
-    @pytest.fixture(autouse=True)
-    def mock_pdf_conversion(self):
-        """Block all PDF conversion — no Word prompts during tests."""
-        with patch('doc_generator.DocGenerator._try_weasyprint', return_value=False), \
-             patch('doc_generator.DocGenerator._try_applescript_word', return_value=False), \
-             patch('doc_generator.DocGenerator._try_libreoffice', return_value=False), \
-             patch('doc_generator.DocGenerator._try_docx2pdf', return_value=False):
-            yield
-
     def _scan_score_queue(self, tmp_config, tracker, jobs, score=72):
         """Helper: scan → score → queue for tailoring."""
         with patch('job_scanner.JobScanner.scan_all', return_value=jobs):
@@ -545,14 +536,6 @@ class TestPhase3Tailor:
 # ── Phase 4: Review / status flow tests ──────────────────────────────────────
 
 class TestPhase4ReviewAndStatus:
-
-    @pytest.fixture(autouse=True)
-    def mock_pdf_conversion(self):
-        with patch('doc_generator.DocGenerator._try_weasyprint', return_value=False), \
-             patch('doc_generator.DocGenerator._try_applescript_word', return_value=False), \
-             patch('doc_generator.DocGenerator._try_libreoffice', return_value=False), \
-             patch('doc_generator.DocGenerator._try_docx2pdf', return_value=False):
-            yield
 
     def _full_pipeline(self, tmp_config, tracker, job):
         """Run full scan → score → tailor pipeline."""
