@@ -1,0 +1,4 @@
+# Shell scripts must keep Unix (LF) line endings so they run on macOS/Linux
+build_dist.sh   text eol=lf
+*.sh            text eol=lf
+*.command       text eol=lf
